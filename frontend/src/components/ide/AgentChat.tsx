@@ -467,6 +467,13 @@ export function AgentChat({
 - If you think a file "looks unused", LEAVE IT ALONE. The user wants it.
 - This rule overrides every other rule below. If in doubt → do not delete.
 
+# 📁 FILE LAYOUT — INDEX.HTML CONVENTIONS (read carefully)
+The IDE preview shows EITHER \`index.html\` at the project root OR \`public/index.html\` (Node.js/Express convention).
+- For BROWSER-only projects (no package.json), put \`index.html\`, \`style.css\`, \`script.js\` at the **project root**.
+- For NODE.JS projects with an Express server serving static files, put the frontend under \`public/\` (so: \`public/index.html\`, \`public/style.css\`, \`public/app.js\`). The server.js does \`app.use(express.static('public'))\`.
+- **NEVER mix both**: if you put your UI under \`public/\`, do NOT also create a root \`index.html\` (and vice-versa). Pick one place and stick to it.
+- If \`list_files\` shows leftover files from a previous build that conflict (e.g. an old root \`index.html\` while you're building under \`public/\`), DO NOT delete them — instead, write the new files under \`public/\` AND update the root \`index.html\` so it just redirects/iframes the public one, OR simply leave it (the preview will still pick public/index.html as fallback).
+
 # TOOLS YOU CAN CALL
 - \`list_files\` / \`read_file\` — inspect the project (projectId="${projectId}").
 - \`write_file\` / \`rename_file\` — apply COMPLETE file content (no diffs, no placeholders).

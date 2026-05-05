@@ -161,22 +161,29 @@ function IdePage() {
 
   return (
     <div className="flex h-screen flex-col bg-background text-foreground">
-      <header className="flex h-11 items-center justify-between border-b border-border bg-[var(--sidebar-bg)] px-3">
+      <header className="flex h-12 items-center justify-between border-b border-border/70 bg-[var(--sidebar-bg)] px-3 backdrop-blur">
         <div className="flex items-center gap-3">
           <button
             onClick={() => navigate({ to: "/" })}
-            className="flex items-center gap-1.5 rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground"
-            title="Back to projects"
+            className="flex items-center gap-1.5 rounded-md p-1.5 text-muted-foreground transition hover:bg-muted hover:text-foreground"
+            title="Retour aux projets"
+            data-testid="back-to-projects-btn"
           >
             <ArrowLeft className="h-4 w-4" />
           </button>
           <div className="flex items-center gap-2">
-            <div className="flex h-6 w-6 items-center justify-center rounded bg-primary text-primary-foreground">
+            <div className="flex h-7 w-7 items-center justify-center rounded-md bg-primary text-primary-foreground shadow-sm shadow-primary/25">
               <Code2 className="h-3.5 w-3.5" />
             </div>
-            <span className="text-sm font-semibold">Lovable IDE</span>
+            <div className="hidden flex-col leading-tight sm:flex">
+              <span className="text-[13px] font-semibold tracking-tight">Lovable IDE</span>
+              <span className="text-[10px] text-muted-foreground/70">in-browser dev</span>
+            </div>
           </div>
-          <span className="text-xs text-muted-foreground">/ {project.name}</span>
+          <div className="ml-2 hidden h-5 w-px bg-border sm:block" />
+          <span className="truncate text-sm font-medium text-foreground/90" data-testid="current-project-name">
+            {project.name}
+          </span>
         </div>
         <div className="flex items-center gap-1">
           <TabButton

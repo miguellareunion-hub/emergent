@@ -139,35 +139,64 @@ btn.addEventListener("click", () => {
 });
 `;
 
-export const createStarterProject = (name: string, description = ""): Project => ({
+/**
+ * Create a brand-new project. By default the project is COMPLETELY EMPTY
+ * (no files) so the AI agent can fully control the file structure when the
+ * user asks for a custom build. Pass `withStarter: true` to seed the classic
+ * HTML/CSS/JS demo files instead.
+ */
+export const createStarterProject = (
+  name: string,
+  description = "",
+  withStarter = false,
+): Project => ({
   id: uid(),
   name,
   description,
   createdAt: Date.now(),
   updatedAt: Date.now(),
-  files: [
-    { id: uid(), name: "index.html", content: STARTER_HTML, language: "html" },
-    { id: uid(), name: "style.css", content: STARTER_CSS, language: "css" },
-    { id: uid(), name: "script.js", content: STARTER_JS, language: "javascript" },
-  ],
+  files: withStarter
+    ? [
+        { id: uid(), name: "index.html", content: STARTER_HTML, language: "html" },
+        { id: uid(), name: "style.css", content: STARTER_CSS, language: "css" },
+        { id: uid(), name: "script.js", content: STARTER_JS, language: "javascript" },
+      ]
+    : [],
 });
 
 /**
  * Build a single self-contained HTML document for the iframe preview.
  * Inlines linked stylesheets and scripts referenced by simple relative paths.
+ *
+ * Looks for `index.html` at the project root first. If absent, falls back to
+ * `public/index.html` (common in Node.js / Express projects where the static
+ * frontend lives under public/).
  */
 export const buildPreviewDoc = (files: FileNode[]): string => {
-  const html = files.find((f) => f.name.toLowerCase() === "index.html");
+  const html =
+    files.find((f) => f.name.toLowerCase() === "index.html") ??
+    files.find((f) => f.name.toLowerCase() === "public/index.html");
   if (!html) {
-    return `<!doctype html><html><body style="font-family:sans-serif;color:#94a3b8;background:#0f172a;display:grid;place-items:center;height:100vh;margin:0"><div style="text-align:center"><h2>No index.html</h2><p>Create an <code>index.html</code> file to see a preview.</p></div></body></html>`;
+    return `<!doctype html><html><body style="font-family:ui-sans-serif,system-ui;color:#94a3b8;background:#0a0e1a;display:grid;place-items:center;height:100vh;margin:0">
+<div style="text-align:center;max-width:380px;padding:24px">
+  <div style="width:48px;height:48px;border-radius:12px;background:linear-gradient(135deg,#22c55e22,#22c55e11);display:grid;place-items:center;margin:0 auto 16px;border:1px solid #22c55e33">
+    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#22c55e" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
+  </div>
+  <h2 style="margin:0 0 8px;color:#e2e8f0;font-weight:600;font-size:18px">Aucun aperçu disponible</h2>
+  <p style="margin:0;font-size:13px;line-height:1.5">Demandez à l'agent IA de créer un <code style="color:#22c55e;background:#22c55e15;padding:2px 6px;border-radius:4px;font-family:ui-monospace,monospace;font-size:12px">index.html</code> ou <code style="color:#22c55e;background:#22c55e15;padding:2px 6px;border-radius:4px;font-family:ui-monospace,monospace;font-size:12px">public/index.html</code> pour voir le rendu live.</p>
+</div></body></html>`;
   }
+  // Resolve sibling references relative to the html file's folder
+  // e.g. for public/index.html, "style.css" resolves to "public/style.css".
+  const folder = html.name.includes("/") ? html.name.replace(/\/[^/]+$/, "/") : "";
   let doc = html.content;
 
   // Replace <link rel="stylesheet" href="x.css"> with inline <style>
   doc = doc.replace(
     /<link\s+[^>]*href=["']([^"']+\.css)["'][^>]*>/gi,
     (_match, href: string) => {
-      const f = files.find((x) => x.name === href);
+      const candidates = [href, folder + href];
+      const f = files.find((x) => candidates.includes(x.name));
       return f ? `<style>\n${f.content}\n</style>` : "";
     },
   );
@@ -176,7 +205,8 @@ export const buildPreviewDoc = (files: FileNode[]): string => {
   doc = doc.replace(
     /<script\s+[^>]*src=["']([^"']+\.js)["'][^>]*>\s*<\/script>/gi,
     (_match, src: string) => {
-      const f = files.find((x) => x.name === src);
+      const candidates = [src, folder + src];
+      const f = files.find((x) => candidates.includes(x.name));
       return f ? `<script>\n${f.content}\n<\/script>` : "";
     },
   );
