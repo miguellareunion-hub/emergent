@@ -161,6 +161,23 @@ export function AgentChat({
   const abortRef = useRef<AbortController | null>(null);
   const sendRef = useRef<((text: string) => void) | null>(null);
 
+  // Prevent accidental page reloads / navigation while the AI agent is
+  // streaming / writing files. Without this guard, mobile pull-to-refresh,
+  // the back button, or a swipe gesture would kill the in-flight stream and
+  // lose the partially generated project.
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    if (!loading) return;
+    const handler = (e: BeforeUnloadEvent) => {
+      e.preventDefault();
+      // Required for the prompt to actually appear in older browsers.
+      e.returnValue = "L'agent IA travaille — quitter va annuler la génération.";
+      return e.returnValue;
+    };
+    window.addEventListener("beforeunload", handler);
+    return () => window.removeEventListener("beforeunload", handler);
+  }, [loading]);
+
   // Persist chat history per-project so a page refresh doesn't wipe context.
   useEffect(() => {
     if (typeof window === "undefined") return;
