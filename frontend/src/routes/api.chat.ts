@@ -86,20 +86,21 @@ Your job: read the error messages in the user's message, identify the ROOT cause
 ${BASE_RULES}`;
 
 const PLANNER_PROMPT = `You are the PLANNER agent of an autonomous multi-agent system inside Lovable IDE.
-Your job: take a LONG or COMPLEX user request and split it into 2 to 6 SMALL, ORDERED, INDEPENDENT build steps that the BUILDER agent will execute one after the other.
+Your job: take a LONG or COMPLEX user request and split it into 2 to 8 SMALL, ORDERED, INDEPENDENT build steps that the BUILDER agent will execute one after the other.
 
 Rules:
 - Output ONLY valid JSON (no prose, no markdown fences). Schema:
   { "steps": [ { "title": "short title", "instruction": "concrete instruction for the builder, in the same language as the user prompt" } ] }
 - Each step must be small enough to be implemented in a single response (one or a few files).
-- Step 1 is ALWAYS the base structure (HTML skeleton + CSS + main JS file with empty hooks).
+- Step 1 is ALWAYS the base structure (skeleton: package.json or index.html + main entry file + main CSS).
 - Following steps add features INCREMENTALLY on top of the previous step. They must NOT recreate files from scratch — they patch / extend.
-- Keep at most 6 steps. Merge tiny tasks together.
+- **For big multi-file projects** (when the user lists 8+ files or many features), you MAY use up to 8 steps and SHOULD group related files together (e.g. step "backend skeleton" = server.js + config.json + JSON storage; step "bot core" = strategy.js + indicators.js + binance.js).
+- **Every file mentioned by the user MUST appear in at least one step's instruction** — do not skip any.
 - Keep instructions short (1-3 sentences each). The builder already knows the global goal from step 1.
-- Do NOT add deployment, testing, documentation, or "polish" steps.
-- If the user request is already small/simple, output a single step.
+- Do NOT add deployment, testing, documentation, or "polish" steps unless the user explicitly asks for them.
+- If the user request is small/simple (1-3 files), output a single step.
 
-Environment: browser-only (HTML/CSS/vanilla JS, no Node, no npm). Files at project root.`;
+Environment: a sandboxed Node Runner OR a browser iframe preview (HTML/CSS/JS). The runner may be unavailable — in that case the BUILDER will simply emit files without running them. Files live at the project root or in a single subfolder.`;
 
 function getSystemPrompt(role: AgentRole): string {
   if (role === "fixer") return FIXER_PROMPT;
@@ -195,6 +196,9 @@ export const Route = (createFileRoute as any)("/api/chat")({
             model: chosenModel,
             stream: useStreaming,
             messages: [{ role: "system", content: systemPrompt }, ...messages],
+            // Allow the model to emit large multi-file responses without
+            // getting truncated mid-write_file.
+            max_tokens: 16384,
           };
           if (Array.isArray(tools) && tools.length > 0) {
             payload.tools = tools;

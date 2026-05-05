@@ -103,9 +103,9 @@ const SUGGESTIONS = [
 
 /** Delay after applying files so the iframe runs and reports any errors. */
 const RUNTIME_OBSERVE_MS = 1500;
-const REPEATED_TOOL_ATTEMPT_LIMIT = 3;
-const REPEATED_FAILURE_LIMIT = 2;
-const NO_PROGRESS_TOOL_STEPS_LIMIT = 8;
+const REPEATED_TOOL_ATTEMPT_LIMIT = 4;
+const REPEATED_FAILURE_LIMIT = 3;
+const NO_PROGRESS_TOOL_STEPS_LIMIT = 12;
 
 function supportsReliableNativeTools(provider: "lovable" | "openai" | "lmstudio"): boolean {
   return provider !== "lmstudio";
@@ -456,45 +456,56 @@ export function AgentChat({
 # TOOLS YOU CAN CALL
 - \`list_files\` / \`read_file\` — inspect the project (projectId="${projectId}").
 - \`write_file\` / \`rename_file\` / \`delete_file\` — apply COMPLETE file content (no diffs, no placeholders).
-- \`exec_shell\` — run a command in the project workspace (npm, node, ls, cat, git…).
-- \`http_fetch\` — call an HTTP endpoint from the runner (test the app, hit an API).
+- \`exec_shell\` — run a command in the project workspace (npm, node, ls, cat, git…). Often unavailable: see "RUNNER" below.
+- \`http_fetch\` — call an HTTP endpoint from the runner (test the app, hit an API). Often unavailable: see "RUNNER".
 - \`web_search\` — search the web for docs, error messages, API syntax, library versions.
 - \`finish\` — declare the task done with a short summary. Stop calling tools after this.
 
+# RUNNER (read carefully — this changes how you work)
+The Node Runner that backs \`exec_shell\` and \`http_fetch\` may NOT be configured.
+- If \`exec_shell\` returns \`{ "skipped": true, ... }\`, the runner is offline.
+- In that case: STOP calling \`exec_shell\` / \`http_fetch\` immediately. Just write every required file with \`write_file\` and call \`finish\` with a short summary like "Project ready. Run with: npm install && npm start".
+- For BROWSER-only projects (HTML/CSS/JS without package.json), the iframe preview runs them automatically — no shell needed.
+
 # HOW TO WORK (mandatory)
-1. **Understand first**: call \`list_files\`, then \`read_file\` on every file you intend to change. Never write a file blind.
-2. **Plan in 1 sentence** in plain text before acting (so the user sees what you're about to do).
+1. **Understand first**: call \`list_files\` ONCE at the very start, then \`read_file\` only on files you intend to modify.
+2. **Plan in 1 short sentence** in plain text before acting.
 3. **Targeted edits**: only re-emit files that actually change. Preserve names, exports, ids, classes.
-4. **For Node.js projects**, follow this exact pipeline — never skip a step:
-   a. Make sure \`package.json\` is correct (every imported package listed in deps; valid \`scripts.start\`).
-   b. Run \`exec_shell\` → \`npm install\` ONCE. If it fails, read the error, fix package.json, retry once.
-   c. Run \`exec_shell\` → \`node -c <entry>.js\` to check syntax of the entrypoint before launching.
-   d. Start the app with \`npm start\` (or \`node server.js\`) using \`timeoutMs: 5000\` so the call returns even if the server stays up.
-   e. Verify with \`http_fetch\` against the running server (e.g. \`http://localhost:3000/\`). A 2xx/3xx response = success.
-   f. Only then call \`finish\`.
-5. **For pure browser projects** (HTML/CSS/JS, no package.json): no shell needed. Just write the files; the iframe preview runs them automatically. Then \`finish\`.
-6. **Never claim success without evidence** (a passing http_fetch, a 0 exit code, or a clean \`node -c\`).
+4. **Batch big projects**: when the user asks you to create N files (>5), emit \`write_file\` calls for ALL of them across one or two assistant turns. Don't pause for unnecessary status updates.
+5. **For Node.js projects WHEN the runner IS available**:
+   a. Make sure \`package.json\` lists every imported package and a valid \`scripts.start\`.
+   b. Run \`npm install\` ONCE. If it fails, read the error, fix package.json, retry once.
+   c. Run \`node -c <entry>.js\` to check syntax of the entrypoint.
+   d. Start the app with \`timeoutMs: 5000\` so the call returns even if the server stays up.
+   e. Verify with \`http_fetch\` against the running server. A 2xx/3xx response = success.
+   f. Call \`finish\`.
+6. **For Node.js projects WHEN the runner is NOT available** (most common in this IDE):
+   a. Write every file listed by the user (or that your design needs) with \`write_file\`.
+   b. Make sure \`package.json\` is correct (deps, scripts.start = "node server.js" or similar).
+   c. Call \`finish\` with run instructions for the user.
+7. **Pure browser projects** (HTML/CSS/JS, no package.json): write the files; the iframe preview runs them automatically. Then \`finish\`.
 
 # WRITING FILES — HARD RULES
 - ALWAYS pass the COMPLETE final code in \`content\`. Never the words "FULL CONTENT", "...", "<file content>" or any placeholder — these are rejected.
 - Never write a file you have not read first if it already exists.
 - Never re-emit a file that does not need to change.
+- For BIG projects: it's better to call \`write_file\` MANY times in the same assistant turn (parallel tool_calls) than to spread them across many turns.
 
-# DEBUGGING — THE GOLDEN LOOP
+# DEBUGGING — THE GOLDEN LOOP (only when runner is available)
 When a tool returns an error you MUST react like a senior engineer, not by retrying blindly.
 
-1. **Read the FULL error** (stderr, exit code, stack trace). Quote the key line in plain text so the user sees you understood it.
+1. **Read the FULL error** (stderr, exit code, stack trace). Quote the key line in plain text.
 2. **Diagnose the root cause** in one sentence: missing dep, wrong path, syntax error, version mismatch, port already in use, missing env var, wrong package name, etc.
 3. **Pick the right fix**, in this order of preference:
    - Cannot find module 'X' → check package.json, run \`npm install X\` if it's a real package, otherwise fix the import.
    - Module not found at path '/abs/...' → fix the import path; never re-run with the same absolute path you copied from stderr.
-   - npm ERR! 404 / E404 → the package name is wrong. \`web_search\` for the correct package name BEFORE editing package.json again.
+   - npm ERR! 404 / E404 → the package name is wrong. \`web_search\` for the correct name BEFORE editing package.json again.
    - SyntaxError / ReferenceError → \`read_file\` the file at the reported line, fix the code, re-run.
    - EADDRINUSE → another process holds the port; either change PORT or stop and restart, do NOT loop \`npm start\`.
    - ERR_REQUIRE_ESM / Cannot use import statement → fix \`"type": "module"\` in package.json or convert require/import accordingly.
-   - Unknown / unfamiliar error → \`web_search\` "<key error message> <library>" and read the top result before acting.
+   - Unknown error → \`web_search\` "<key error message> <library>" and read the top result before acting.
 4. **Apply ONE focused fix** with \`write_file\`, then **re-run the failing command exactly once** to verify.
-5. **Stop and \`finish\`** if the same command fails twice with the same error after a fix. Explain the blocker to the user — do not keep looping.
+5. **Stop and \`finish\`** if the same command fails twice with the same error after a fix.
 
 # HARD RULES
 - Never repeat an identical failing tool call without changing a relevant file first.
@@ -503,7 +514,7 @@ When a tool returns an error you MUST react like a senior engineer, not by retry
 - Never delete a file the user didn't ask to delete.
 - Always emit COMPLETE file content with \`write_file\`.
 - Always end the session with a \`finish\` tool call.
-- One assistant turn = think out loud briefly + the next tool call(s). Don't dump huge prose.`;
+- If the user asks for many files (>5), DO NOT stop after the first few — keep going until every file in the spec exists, THEN finish.`;
 
     // Conversation history we send to the model. Tool messages get appended
     // as we go.

@@ -191,13 +191,14 @@ function clip(s: string): string {
 async function runnerCall<T = unknown>(
   endpoint: string,
   body: Record<string, unknown>,
-): Promise<{ ok: true; data: T } | { ok: false; error: string }> {
+): Promise<{ ok: true; data: T } | { ok: false; error: string; notConfigured?: boolean }> {
   const s = loadRunnerSettings();
   if (!s.token || !s.url) {
     return {
       ok: false,
+      notConfigured: true,
       error:
-        "Runner not configured. Open the Node Runner panel and set URL + token first.",
+        "Runner not configured. SKIP shell/http commands and just write the project files — the user will run them locally with `npm install && node server.js`.",
     };
   }
   try {
@@ -355,6 +356,20 @@ export async function executeTool(call: ToolCall, ctx: ToolContext): Promise<Too
         timeoutMs: args.timeoutMs,
       });
       if (!r.ok) {
+        // When the runner isn't configured, treat the call as a benign "skip"
+        // (ok:true) so the agent doesn't burn its failure budget retrying.
+        if ("notConfigured" in r && r.notConfigured) {
+          return {
+            ok: true,
+            label: `Shell indisponible (skip): ${command.slice(0, 40)}`,
+            content: JSON.stringify({
+              skipped: true,
+              reason: r.error,
+              advice:
+                "Continue: just write all required project files with write_file, then call finish. Do NOT call exec_shell again.",
+            }),
+          };
+        }
         return {
           ok: false,
           label: `Shell échec: ${command.slice(0, 40)}`,
@@ -388,6 +403,18 @@ export async function executeTool(call: ToolCall, ctx: ToolContext): Promise<Too
         body: args.body,
       });
       if (!r.ok) {
+        if ("notConfigured" in r && r.notConfigured) {
+          return {
+            ok: true,
+            label: `HTTP indisponible (skip): ${url}`,
+            content: JSON.stringify({
+              skipped: true,
+              reason: r.error,
+              advice:
+                "Continue: just write the project files and call finish. The user will test the running server locally.",
+            }),
+          };
+        }
         return {
           ok: false,
           label: `HTTP échec: ${url}`,

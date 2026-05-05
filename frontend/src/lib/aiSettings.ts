@@ -34,11 +34,17 @@ export const OPENAI_MODELS = [
 
 export const LOVABLE_MODELS = [
   "google/gemini-3-flash-preview",
-  "google/gemini-2.5-flash",
+  "google/gemini-3.1-pro-preview",
   "google/gemini-2.5-pro",
+  "google/gemini-2.5-flash",
+  "openai/gpt-5.2",
+  "openai/gpt-5.1",
   "openai/gpt-5",
   "openai/gpt-5-mini",
-  "openai/gpt-5-nano",
+  "anthropic/claude-sonnet-4-6",
+  "anthropic/claude-opus-4-6",
+  "anthropic/claude-haiku-4-5-20251001",
+  "anthropic/claude-sonnet-4-5-20250929",
 ];
 
 export function loadAISettings(): AISettings {

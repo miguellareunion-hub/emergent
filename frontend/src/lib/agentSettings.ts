@@ -176,11 +176,11 @@ export const DEFAULT_AGENTS_SETTINGS: AgentsSettings = {
   builder: { enabled: true, systemPrompt: "" },
   fixer: { enabled: true, systemPrompt: "" },
   planner: { enabled: true, systemPrompt: "" },
-  maxFixIterations: 5,
+  maxFixIterations: 8,
   plannerMinChars: 280,
   customAgents: PRESET_CUSTOM_AGENTS,
   useNativeTools: true,
-  maxToolIterations: 24,
+  maxToolIterations: 60,
 };
 
 export function loadAgentsSettings(): AgentsSettings {
@@ -204,6 +204,16 @@ export function loadAgentsSettings(): AgentsSettings {
       fixer: { ...DEFAULT_AGENTS_SETTINGS.fixer, ...(parsed.fixer ?? {}) },
       planner: { ...DEFAULT_AGENTS_SETTINGS.planner, ...(parsed.planner ?? {}) },
       customAgents: mergedCustoms,
+      // Force the iteration caps to be at least the new defaults so existing
+      // users automatically benefit from the upgrade without clearing storage.
+      maxFixIterations: Math.max(
+        parsed.maxFixIterations ?? 0,
+        DEFAULT_AGENTS_SETTINGS.maxFixIterations,
+      ),
+      maxToolIterations: Math.max(
+        parsed.maxToolIterations ?? 0,
+        DEFAULT_AGENTS_SETTINGS.maxToolIterations,
+      ),
     };
   } catch {
     return DEFAULT_AGENTS_SETTINGS;
