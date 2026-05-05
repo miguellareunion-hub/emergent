@@ -142,6 +142,13 @@
     border-color: var(--color-border);
   }
 
+  /* Disable mobile pull-to-refresh and over-scroll bounce so the AI agent
+     stream is never interrupted by an accidental swipe-to-reload gesture. */
+  html, body {
+    overscroll-behavior: none;
+    overscroll-behavior-y: contain;
+  }
+
   body {
     background-color: var(--color-background);
     color: var(--color-foreground);
