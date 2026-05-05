@@ -8,13 +8,9 @@ type ChatBody = {
   model?: string;
   openaiApiKey?: string;
   role?: AgentRole;
-  /** Optional custom system prompt that overrides the default for this role. */
   systemPromptOverride?: string;
-  /** Tool-calling support — when present, the model can emit structured tool_calls. */
   tools?: unknown[];
-  /** "auto" | "none" | { type:"function", function:{ name } } */
   tool_choice?: unknown;
-  /** When true, return a single non-streamed JSON response (needed for tool-call loops). */
   nonStreaming?: boolean;
 };
 
@@ -111,6 +107,21 @@ function getSystemPrompt(role: AgentRole): string {
   return BUILDER_PROMPT;
 }
 
+/**
+ * Map a UI-side model id (e.g. "google/gemini-3-flash-preview", "openai/gpt-5",
+ * "anthropic/claude-sonnet-4-5-20250929") to the format expected by the
+ * Emergent integrations proxy (LiteLLM-style).
+ */
+function mapEmergentModel(uiModel: string): string {
+  const m = uiModel.trim();
+  if (m.startsWith("google/")) return `gemini/${m.slice("google/".length)}`;
+  if (m.startsWith("gemini/")) return m;
+  if (m.startsWith("openai/")) return m.slice("openai/".length);
+  if (m.startsWith("anthropic/")) return m.slice("anthropic/".length);
+  // Bare model name — assume OpenAI by default (gpt-*) or already correct.
+  return m;
+}
+
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export const Route = (createFileRoute as any)("/api/chat")({
   server: {
@@ -133,6 +144,7 @@ export const Route = (createFileRoute as any)("/api/chat")({
           let url: string;
           let apiKey: string | undefined;
           let chosenModel: string;
+          const extraHeaders: Record<string, string> = {};
 
           if (provider === "openai") {
             url = "https://api.openai.com/v1/chat/completions";
@@ -145,11 +157,31 @@ export const Route = (createFileRoute as any)("/api/chat")({
               );
             }
           } else {
-            url = "https://ai.gateway.lovable.dev/v1/chat/completions";
-            apiKey = process.env.LOVABLE_API_KEY;
-            chosenModel = model || "google/gemini-3-flash-preview";
+            // "lovable" branch — now backed by the Emergent universal LLM key
+            // via the integrations proxy (OpenAI-compatible, supports streaming
+            // SSE and tool calling).
+            const proxyBase =
+              process.env.INTEGRATION_PROXY_URL ||
+              "https://integrations.emergentagent.com";
+            // Prefer the universal Emergent key, but fall back to a legacy
+            // LOVABLE_API_KEY if the operator wires one in.
+            apiKey = process.env.EMERGENT_LLM_KEY || process.env.LOVABLE_API_KEY;
+            if (apiKey?.startsWith("sk-emergent-")) {
+              url = `${proxyBase.replace(/\/$/, "")}/llm/chat/completions`;
+              chosenModel = mapEmergentModel(model || "google/gemini-3-flash-preview");
+              if (process.env.APP_URL) {
+                extraHeaders["X-App-ID"] = process.env.APP_URL;
+              }
+            } else {
+              // Legacy Lovable AI gateway fallback.
+              url = "https://ai.gateway.lovable.dev/v1/chat/completions";
+              chosenModel = model || "google/gemini-3-flash-preview";
+            }
             if (!apiKey) {
-              return jsonError("LOVABLE_API_KEY is not configured.", 500);
+              return jsonError(
+                "No LLM key configured. Set EMERGENT_LLM_KEY in /app/frontend/.env",
+                500,
+              );
             }
           }
 
@@ -174,6 +206,7 @@ export const Route = (createFileRoute as any)("/api/chat")({
             headers: {
               Authorization: `Bearer ${apiKey}`,
               "Content-Type": "application/json",
+              ...extraHeaders,
             },
             body: JSON.stringify(payload),
           });
@@ -186,19 +219,19 @@ export const Route = (createFileRoute as any)("/api/chat")({
               return jsonError(
                 provider === "openai"
                   ? "Invalid OpenAI API key. Check it in Settings."
-                  : "Unauthorized to AI gateway.",
+                  : "Unauthorized to AI gateway. Check EMERGENT_LLM_KEY.",
                 401,
               );
             }
             if (upstream.status === 402) {
               return jsonError(
-                "AI credits exhausted. Add credits in Settings → Workspace → Usage.",
+                "AI credits exhausted. Top up your Emergent universal key from Profile → Universal Key.",
                 402,
               );
             }
             const text = await upstream.text();
             console.error("AI provider error", provider, upstream.status, text);
-            return jsonError(`AI provider error (${upstream.status})`, 500);
+            return jsonError(`AI provider error (${upstream.status}): ${text.slice(0, 200)}`, 500);
           }
 
           if (useStreaming) {
@@ -206,7 +239,6 @@ export const Route = (createFileRoute as any)("/api/chat")({
               headers: { "Content-Type": "text/event-stream" },
             });
           }
-          // Non-streaming: forward the full JSON response body for tool-call loops.
           const respText = await upstream.text();
           return new Response(respText, {
             headers: { "Content-Type": "application/json" },
