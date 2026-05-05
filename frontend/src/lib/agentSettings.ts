@@ -40,6 +40,7 @@ export type AgentsSettings = {
 };
 
 const STORAGE_KEY = "lovable-ide:agents-settings";
+const MIGRATION_KEY = "lovable-ide:agents-migration-v2";
 
 export const DEFAULT_BUILDER_PROMPT = `You are the BUILDER agent of an autonomous multi-agent system inside Lovable IDE.
 Your job: design and write working client-side projects from the user's request.
@@ -60,7 +61,10 @@ Split a long/complex user request into 2-6 SMALL ordered build steps for the BUI
 - Step 1 is always the base structure (HTML+CSS+JS skeleton).
 - Each next step adds ONE feature on top. Max 6 steps. No prose, no markdown fences.`;
 
-/** Pre-configured "Lovable-style" agents seeded by default. */
+/** Pre-configured "Lovable-style" agents seeded by default. ALL DISABLED by default
+ * — they used to run as additional passes after the Builder/Fixer and caused a
+ * delete→recreate doom-loop on multi-file projects. Users can re-enable them
+ * individually from Settings → Agents if they really want extra refinement passes. */
 export const PRESET_CUSTOM_AGENTS: CustomAgent[] = [
   {
     id: "preset-patcher",
@@ -69,7 +73,7 @@ export const PRESET_CUSTOM_AGENTS: CustomAgent[] = [
     description:
       "Garantit que les demandes de modification ne réécrivent PAS tout le projet : ne touche qu'aux fichiers nécessaires.",
     role: "builder",
-    enabled: true,
+    enabled: false,
     systemPrompt: `You are the PATCHER agent inside Lovable IDE.
 The Builder may have over-rewritten the project. Your job: ENFORCE minimal edits.
 
@@ -78,7 +82,7 @@ Hard rules:
 - If the Builder re-emitted files that did NOT need to change, that is a bug. DO NOT re-emit them yourself either — the previous version on disk is canonical.
 - If the Builder MISSED a file that needed a small touch (e.g. wiring a new button to an existing handler), re-emit ONLY that file with <lov-write>.
 - If the Builder's output is already minimal and correct, just say "Patch OK" and emit nothing.
-- NEVER use <lov-delete> unless the user explicitly asked to delete that file.
+- ABSOLUTELY NEVER use <lov-delete>. Even if a file looks unused, leave it alone. Only the user can ask for deletions.
 - Preserve all existing variable names, IDs, classes, exported APIs.
 - Always output COMPLETE files when you do write.`,
   },
@@ -96,6 +100,7 @@ The Builder just produced a working project. Your job: make it BEAUTIFUL.
 - Prefer modern, minimal, Apple/Linear-inspired aesthetics unless the user asked for something else.
 - Re-emit ONLY the file(s) you change (usually style.css and sometimes index.html) using <lov-write> with COMPLETE content.
 - Do NOT change behaviour or remove features. Do NOT add Node/build steps.
+- ABSOLUTELY NEVER use <lov-delete>.
 - If the design is already great, briefly say "RAS" and emit nothing.`,
   },
   {
@@ -110,6 +115,7 @@ Read the project produced by the Builder and improve code quality WITHOUT changi
 - Split functions > 40 lines, give clearer names, remove dead code and duplication.
 - Keep the public API of each file identical (same global functions, same DOM ids/classes used).
 - Re-emit changed files in full with <lov-write>. Keep filenames at root.
+- ABSOLUTELY NEVER use <lov-delete>.
 - If the code is already clean, output a one-line "RAS" and emit no files.`,
   },
   {
@@ -118,13 +124,13 @@ Read the project produced by the Builder and improve code quality WITHOUT changi
     emoji: "♿",
     description: "Vérifie alt, labels, contraste, rôles ARIA, navigation clavier.",
     role: "fixer",
-    enabled: true,
+    enabled: false,
     systemPrompt: `You are the ACCESSIBILITY (a11y) agent inside Lovable IDE.
 Audit the current HTML/CSS for accessibility problems and fix them:
 - Missing alt on <img>, missing <label> on form fields, missing button text.
 - Insufficient color contrast, missing :focus styles, missing aria-* where needed.
 - Improper heading order (h1 → h2 → h3).
-Re-emit only the file(s) that need fixes with <lov-write>. If nothing to fix, say "A11y OK".`,
+Re-emit only the file(s) that need fixes with <lov-write>. ABSOLUTELY NEVER use <lov-delete>. If nothing to fix, say "A11y OK".`,
   },
   {
     id: "preset-debugger",
@@ -132,12 +138,13 @@ Re-emit only the file(s) that need fixes with <lov-write>. If nothing to fix, sa
     emoji: "🐛",
     description: "Analyse les erreurs runtime en profondeur et propose un correctif robuste.",
     role: "fixer",
-    enabled: true,
+    enabled: false,
     systemPrompt: `You are the DEBUGGER agent inside Lovable IDE.
 A previous Fixer pass already attempted to repair runtime errors. Your job is a deeper review:
 - Re-read the errors and the current files in <context>.
 - Look for ROOT-cause issues: race conditions, missing null checks, wrong selectors, event listeners attached too early, etc.
 - If you find a real remaining bug, re-emit the corrected file(s) with <lov-write>.
+- ABSOLUTELY NEVER use <lov-delete>.
 - Otherwise, briefly explain why the current code is correct and emit no files.`,
   },
   {
@@ -153,7 +160,7 @@ Improve discoverability of the project's index.html:
 - Add a relevant <meta name="description"> (< 160 chars).
 - Add Open Graph tags (og:title, og:description, og:type=website).
 - Use semantic HTML (header/main/section/article/footer) and a single <h1>.
-Re-emit index.html with <lov-write> if any change is needed. Don't touch JS or CSS unless required.`,
+Re-emit index.html with <lov-write> if any change is needed. ABSOLUTELY NEVER use <lov-delete>. Don't touch JS or CSS unless required.`,
   },
   {
     id: "preset-perf",
@@ -168,7 +175,7 @@ Look for obvious performance problems in the current project:
 - Heavy DOM operations inside a hot loop (use DocumentFragment, batch updates).
 - Repeated querySelector calls that could be cached.
 - Inline images that should use loading="lazy".
-Re-emit only the file(s) you change with <lov-write>. If nothing to optimize, say "Perf OK".`,
+Re-emit only the file(s) you change with <lov-write>. ABSOLUTELY NEVER use <lov-delete>. If nothing to optimize, say "Perf OK".`,
   },
 ];
 
@@ -190,11 +197,35 @@ export function loadAgentsSettings(): AgentsSettings {
     if (!raw) return DEFAULT_AGENTS_SETTINGS;
     const parsed = JSON.parse(raw) as Partial<AgentsSettings>;
     const savedCustoms = Array.isArray(parsed.customAgents) ? parsed.customAgents : [];
+
+    // ---- One-time migration v2 ----
+    // Old versions seeded "Patcher", "Debugger", "Accessibilité" as ENABLED by
+    // default. They caused a delete→recreate doom-loop on multi-file projects.
+    // Force them OFF once, then never touch the user's choice again.
+    const migrationDone = localStorage.getItem(MIGRATION_KEY) === "1";
+    const PRESET_IDS_TO_DISABLE = new Set([
+      "preset-patcher",
+      "preset-debugger",
+      "preset-a11y",
+    ]);
+    const migratedCustoms = savedCustoms.map((a) =>
+      !migrationDone && PRESET_IDS_TO_DISABLE.has(a.id)
+        ? { ...a, enabled: false }
+        : a,
+    );
+    if (!migrationDone) {
+      try {
+        localStorage.setItem(MIGRATION_KEY, "1");
+      } catch {
+        /* ignore */
+      }
+    }
+
     // Merge in any preset the user doesn't have yet (matched by id), without
     // overwriting their edits/toggles for presets they already have.
-    const existingIds = new Set(savedCustoms.map((a) => a.id));
+    const existingIds = new Set(migratedCustoms.map((a) => a.id));
     const mergedCustoms = [
-      ...savedCustoms,
+      ...migratedCustoms,
       ...PRESET_CUSTOM_AGENTS.filter((p) => !existingIds.has(p.id)),
     ];
     return {

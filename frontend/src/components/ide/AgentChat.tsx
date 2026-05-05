@@ -381,7 +381,7 @@ export function AgentChat({
     return { text: assistantSoFar, actions };
   };
 
-  const applyActions = (actions: AgentAction[]) => {
+  const applyActions = (actions: AgentAction[], allowDelete = false) => {
     const failures: string[] = [];
     for (const a of actions) {
       try {
@@ -400,6 +400,13 @@ export function AgentChat({
             );
           }
         } else if (a.type === "delete") {
+          if (!allowDelete) {
+            // Silently refuse — protects users from delete-loop bugs.
+            failures.push(
+              `🛡️ Suppression de ${a.path} bloquée (le prompt n'a pas demandé de supprimer ce fichier).`,
+            );
+            continue;
+          }
           onDeleteFile(a.path);
           if (typeof window !== "undefined") {
             window.dispatchEvent(
@@ -453,11 +460,19 @@ export function AgentChat({
 
     const systemPrompt = `${baseRole}
 
+# 🛡️ ABSOLUTE TOP PRIORITY RULE — NO DELETE
+**NEVER call \`delete_file\` UNLESS the user's CURRENT message contains the explicit French/English word "supprime", "delete", or "remove" naming that exact file.**
+- If the user is asking you to CREATE / BUILD a project, your job is ONLY to write files. Deleting any file in this scenario is FORBIDDEN and counts as failure.
+- If the user is asking for a MODIFICATION, only \`write_file\` to update the relevant files. NEVER delete.
+- If you think a file "looks unused", LEAVE IT ALONE. The user wants it.
+- This rule overrides every other rule below. If in doubt → do not delete.
+
 # TOOLS YOU CAN CALL
 - \`list_files\` / \`read_file\` — inspect the project (projectId="${projectId}").
-- \`write_file\` / \`rename_file\` / \`delete_file\` — apply COMPLETE file content (no diffs, no placeholders).
-- \`exec_shell\` — run a command in the project workspace (npm, node, ls, cat, git…). Often unavailable: see "RUNNER" below.
-- \`http_fetch\` — call an HTTP endpoint from the runner (test the app, hit an API). Often unavailable: see "RUNNER".
+- \`write_file\` / \`rename_file\` — apply COMPLETE file content (no diffs, no placeholders).
+- \`delete_file\` — ONLY when the user explicitly asks for it (see rule above).
+- \`exec_shell\` — run a command in the project workspace. Often unavailable: see "RUNNER" below.
+- \`http_fetch\` — call an HTTP endpoint from the runner. Often unavailable: see "RUNNER".
 - \`web_search\` — search the web for docs, error messages, API syntax, library versions.
 - \`finish\` — declare the task done with a short summary. Stop calling tools after this.
 
@@ -496,22 +511,20 @@ When a tool returns an error you MUST react like a senior engineer, not by retry
 
 1. **Read the FULL error** (stderr, exit code, stack trace). Quote the key line in plain text.
 2. **Diagnose the root cause** in one sentence: missing dep, wrong path, syntax error, version mismatch, port already in use, missing env var, wrong package name, etc.
-3. **Pick the right fix**, in this order of preference:
+3. **Pick the right fix**:
    - Cannot find module 'X' → check package.json, run \`npm install X\` if it's a real package, otherwise fix the import.
-   - Module not found at path '/abs/...' → fix the import path; never re-run with the same absolute path you copied from stderr.
    - npm ERR! 404 / E404 → the package name is wrong. \`web_search\` for the correct name BEFORE editing package.json again.
    - SyntaxError / ReferenceError → \`read_file\` the file at the reported line, fix the code, re-run.
    - EADDRINUSE → another process holds the port; either change PORT or stop and restart, do NOT loop \`npm start\`.
    - ERR_REQUIRE_ESM / Cannot use import statement → fix \`"type": "module"\` in package.json or convert require/import accordingly.
-   - Unknown error → \`web_search\` "<key error message> <library>" and read the top result before acting.
 4. **Apply ONE focused fix** with \`write_file\`, then **re-run the failing command exactly once** to verify.
 5. **Stop and \`finish\`** if the same command fails twice with the same error after a fix.
+6. **NEVER fix an error by deleting the broken file** — fix the code inside it.
 
 # HARD RULES
 - Never repeat an identical failing tool call without changing a relevant file first.
-- Never reuse absolute machine paths copied from stderr/stdout as a new command.
-- Never re-run \`npm install\` more than twice in a row; if it keeps failing, the root cause is in package.json — read it and fix it.
-- Never delete a file the user didn't ask to delete.
+- Never re-run \`npm install\` more than twice in a row; if it keeps failing, the root cause is in package.json.
+- ABSOLUTELY NEVER delete a file the user did not ask to delete.
 - Always emit COMPLETE file content with \`write_file\`.
 - Always end the session with a \`finish\` tool call.
 - If the user asks for many files (>5), DO NOT stop after the first few — keep going until every file in the spec exists, THEN finish.`;
@@ -557,6 +570,14 @@ When a tool returns an error you MUST react like a senior engineer, not by retry
       onRenameFile,
       onDeleteFile,
     };
+
+    // ---- DELETE GUARD ----
+    // The agent must NEVER delete files unless the user explicitly asked for it.
+    // We compute this once from the original user prompt and refuse delete_file
+    // calls that don't match.
+    const userAllowsDelete = /\b(supprime|supprimer|efface|effacer|delete|remove)\b/i.test(
+      initialUserPrompt,
+    );
 
     const maxIters = Math.max(1, agentsSettings.maxToolIterations || 24);
     const toolAttemptCounts = new Map<string, number>();
@@ -671,6 +692,31 @@ When a tool returns an error you MUST react like a senior engineer, not by retry
           name: tc.function.name,
           args: parsedArgs,
         };
+
+        // ---- DELETE GUARD: refuse delete_file unless the user asked for it ----
+        if (call.name === "delete_file" && !userAllowsDelete) {
+          const blockedPath = String(call.args?.path ?? "(unknown)");
+          const refusal: ToolResult = {
+            ok: false,
+            label: `🛡️ Suppression refusée : ${blockedPath}`,
+            content: JSON.stringify({
+              blocked: true,
+              error:
+                "delete_file is FORBIDDEN: the user did not ask to delete any file. Use write_file to update the project, never delete. Continue building.",
+            }),
+          };
+          toolEvents.push({ label: refusal.label, ok: refusal.ok });
+          updateBubble();
+          history.push({
+            role: "tool",
+            tool_call_id: tc.id,
+            name: tc.function.name,
+            content: refusal.content,
+          });
+          nonProgressSteps += 1;
+          continue;
+        }
+
         const signature = `${call.name}:${stableStringify(call.args)}`;
         toolAttemptCounts.set(signature, (toolAttemptCounts.get(signature) ?? 0) + 1);
         setStatusLine(`🔧 ${call.name}…`);
@@ -767,6 +813,10 @@ When a tool returns an error you MUST react like a senior engineer, not by retry
     if (intent === "modify") {
       setStatusLine("Mode modification ciblée détecté — édition minimale…");
     }
+    // Only allow delete when the user explicitly asked for it.
+    const allowDelete = /\b(supprime|supprimer|efface|effacer|delete|remove)\b/i.test(
+      instruction,
+    );
     const prefix = stepLabel ? `${stepLabel}\n\n` : "";
     const builderUserMsg: Msg = {
       role: "user",
@@ -775,7 +825,7 @@ When a tool returns an error you MUST react like a senior engineer, not by retry
     const builderHistory: Msg[] = [...priorMessages, builderUserMsg];
     const builderResult = await runAgentTurn("builder", builderHistory, controller.signal);
     if (!builderResult) return false;
-    const builderFailures = applyActions(builderResult.actions);
+    const builderFailures = applyActions(builderResult.actions, allowDelete);
     if (builderFailures.length > 0) {
       setMessages((prev) => [
         ...prev,
@@ -814,7 +864,7 @@ When a tool returns an error you MUST react like a senior engineer, not by retry
         `${ca.emoji} ${ca.name}`,
       );
       if (!caResult) break;
-      const caFailures = applyActions(caResult.actions);
+      const caFailures = applyActions(caResult.actions, allowDelete);
       if (caFailures.length > 0) {
         setMessages((prev) => [
           ...prev,
@@ -879,7 +929,7 @@ When a tool returns an error you MUST react like a senior engineer, not by retry
       ];
       const fixerResult = await runAgentTurn("fixer", fixerHistory, controller.signal);
       if (!fixerResult) break;
-      const fixerFailures = applyActions(fixerResult.actions);
+      const fixerFailures = applyActions(fixerResult.actions, allowDelete);
       if (fixerFailures.length > 0) {
         setMessages((prev) => [
           ...prev,
@@ -915,7 +965,7 @@ When a tool returns an error you MUST react like a senior engineer, not by retry
           `${ca.emoji} ${ca.name}`,
         );
         if (!caResult) break;
-        const caFailures = applyActions(caResult.actions);
+        const caFailures = applyActions(caResult.actions, allowDelete);
         if (caFailures.length > 0) break;
         if (caResult.actions.length > 0) onSwitchToPreview?.();
         lastAssistantText = caResult.text;

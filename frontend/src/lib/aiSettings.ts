@@ -16,7 +16,7 @@ export const DEFAULT_SETTINGS: AISettings = {
   provider: "lovable",
   openaiApiKey: "",
   openaiModel: "gpt-4o-mini",
-  lovableModel: "google/gemini-3-flash-preview",
+  lovableModel: "anthropic/claude-sonnet-4-6",
   lmstudioBaseUrl: "http://localhost:1234/v1",
   lmstudioModel: "local-model",
   lmstudioApiKey: "",
