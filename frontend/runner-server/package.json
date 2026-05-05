@@ -1,0 +1,19 @@
+{
+  "name": "lovable-ide-runner",
+  "version": "1.0.0",
+  "private": true,
+  "type": "commonjs",
+  "description": "Local Node runner that executes user projects (npm install, npm run dev) and streams logs back to the Lovable IDE web UI.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node --watch server.js",
+    "start:once": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "cors": "^2.8.5",
+    "ws": "^8.17.0",
+    "http-proxy-middleware": "^3.0.0"
+  }
+}
