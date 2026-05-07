@@ -193,7 +193,7 @@ async function runnerCall<T = unknown>(
   body: Record<string, unknown>,
 ): Promise<{ ok: true; data: T } | { ok: false; error: string; notConfigured?: boolean }> {
   const s = loadRunnerSettings();
-  if (!s.token || !s.url) {
+  if (!s.token) {
     return {
       ok: false,
       notConfigured: true,
@@ -202,7 +202,9 @@ async function runnerCall<T = unknown>(
     };
   }
   try {
-    const r = await fetch(`${s.url.replace(/\/+$/, "")}${endpoint}`, {
+    // Empty URL → same origin (built-in runner).
+    const base = (s.url || "").replace(/\/+$/, "");
+    const r = await fetch(`${base}${endpoint}`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -344,6 +346,13 @@ export async function executeTool(call: ToolCall, ctx: ToolContext): Promise<Too
           content: JSON.stringify({ error: "command required" }),
         };
       }
+      // Sync the in-memory project files into the runner workspace so that
+      // commands like `npm install`, `node server.js`, `cat file`, etc. see
+      // the same code the user sees in the IDE.
+      const projectFiles = ctx.getFiles().map((f) => ({
+        path: f.name,
+        content: f.content,
+      }));
       const r = await runnerCall<{
         exitCode: number;
         stdout: string;
@@ -354,6 +363,7 @@ export async function executeTool(call: ToolCall, ctx: ToolContext): Promise<Too
         command,
         cwd: args.cwd,
         timeoutMs: args.timeoutMs,
+        files: projectFiles,
       });
       if (!r.ok) {
         // When the runner isn't configured, treat the call as a benign "skip"
