@@ -1,37 +1,18 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { spawn } from "child_process";
-import * as path from "path";
-import * as fs from "fs";
-import * as os from "os";
 
 /**
  * Built-in runner — executes shell commands in an isolated per-project workspace.
- *
- * The agent (browser-side) calls this endpoint via loadRunnerSettings().url + "/api/exec".
- * A shared token protects the endpoint. The workspace is materialised on disk
- * from the project files stored in the request body (since projects live in
- * the user's localStorage, not on the server).
- *
- * Security: arbitrary command execution is intentional — this IS the runner.
- * The token gate prevents random traffic, and the workspace is scoped to a
- * temporary directory per projectId.
+ * Node-only modules are dynamically imported INSIDE the handler so this file
+ * stays safe to bundle in the client.
  */
 
 const RUNNER_TOKEN = process.env.RUNNER_TOKEN || "lovable-ide-local";
-const BASE_WORKSPACE = process.env.WORKSPACES_DIR || path.join(os.tmpdir(), "lovable-runner");
-
-try {
-  fs.mkdirSync(BASE_WORKSPACE, { recursive: true });
-} catch {
-  /* ignore */
-}
 
 type ExecBody = {
   projectId?: string;
   command?: string;
   cwd?: string;
   timeoutMs?: number;
-  /** Optional: full project file tree, synced before the command runs. */
   files?: Array<{ path: string; content: string }>;
 };
 
@@ -45,6 +26,24 @@ export const Route = (createFileRoute as any)("/api/exec")({
         if (token !== RUNNER_TOKEN) {
           return json({ error: "Bad runner token" }, 401);
         }
+
+        // Lazy node-only imports (kept inside the handler so Vite never
+        // tries to bundle them in the client).
+        const [{ spawn }, fs, path, os] = await Promise.all([
+          import("node:child_process"),
+          import("node:fs"),
+          import("node:path"),
+          import("node:os"),
+        ]);
+
+        const baseWorkspace =
+          process.env.WORKSPACES_DIR || path.join(os.tmpdir(), "lovable-runner");
+        try {
+          fs.mkdirSync(baseWorkspace, { recursive: true });
+        } catch {
+          /* */
+        }
+
         const body = (await request.json()) as ExecBody;
         const { projectId, command, cwd, timeoutMs, files } = body;
         if (!projectId || !command) {
@@ -52,14 +51,13 @@ export const Route = (createFileRoute as any)("/api/exec")({
         }
         const safeId = String(projectId).replace(/[^a-zA-Z0-9_-]/g, "");
         if (!safeId) return json({ error: "invalid projectId" }, 400);
-        const workdir = path.join(BASE_WORKSPACE, safeId);
+        const workdir = path.join(baseWorkspace, safeId);
         try {
           fs.mkdirSync(workdir, { recursive: true });
         } catch (e) {
           return json({ error: `mkdir failed: ${(e as Error).message}` }, 500);
         }
 
-        // Sync files if provided
         if (Array.isArray(files)) {
           for (const f of files) {
             if (!f || typeof f.path !== "string") continue;
@@ -70,7 +68,7 @@ export const Route = (createFileRoute as any)("/api/exec")({
               fs.mkdirSync(path.dirname(target), { recursive: true });
               fs.writeFileSync(target, f.content ?? "", "utf8");
             } catch {
-              /* ignore individual file failures */
+              /* */
             }
           }
         }
@@ -112,14 +110,7 @@ export const Route = (createFileRoute as any)("/api/exec")({
             if (settled) return;
             settled = true;
             clearTimeout(killTimer);
-            resolve(
-              json({
-                exitCode,
-                stdout,
-                stderr,
-                timedOut,
-              }),
-            );
+            resolve(json({ exitCode, stdout, stderr, timedOut }));
           };
           proc.on("error", (e) => {
             stderr += `\nspawn error: ${e.message}`;
