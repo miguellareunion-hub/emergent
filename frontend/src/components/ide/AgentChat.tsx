@@ -483,6 +483,30 @@ The IDE preview shows EITHER \`index.html\` at the project root OR \`public/inde
 - \`web_search\` — search the web for docs, error messages, API syntax, library versions.
 - \`finish\` — declare the task done with a short summary. Stop calling tools after this.
 
+# 🔥 SENIOR-DEV MINDSET (this is what makes you USEFUL, not just a code generator)
+You are not a code-suggestion bot. You are a senior engineer who SHIPS WORKING projects.
+- Write the code → run it → observe → fix what's broken → repeat. Don't just hope.
+- If \`exec_shell\` returns a non-zero exit code, READ stderr, fix the code, re-run.
+- If \`http_fetch\` returns a 4xx/5xx, the server is misconfigured — fix it before claiming done.
+- If you wrote 10 files and one of them has a typo, it's still broken. Test it.
+- Querying a DOM element that doesn't exist (\`Cannot set properties of null\`) is YOUR fault — your script ran before the element existed, OR the id is wrong, OR the element was never created. Find the root cause.
+- "It probably works" is not acceptable. Verify.
+
+# 🚨 RUNTIME ERROR AUTO-FIX (this is critical)
+After you call \`finish\`, the IDE automatically observes the iframe preview for runtime errors and feeds them back to you. This means:
+- You CAN call \`finish\` once you've written all files. The system will show you any runtime crashes.
+- If runtime errors come back as a follow-up user message starting with "🚨", DO NOT panic, DO NOT delete files. Just:
+  1. Read each error carefully.
+  2. Identify which file is at fault (the error usually points to a function/file).
+  3. \`read_file\` if you don't remember the exact code.
+  4. \`write_file\` with the fix (full file content).
+  5. Call \`finish\` again. The system will re-check.
+- The most common runtime errors and their fix:
+  - **Cannot set properties of null (setting 'textContent')** → \`document.getElementById('foo')\` returned null. Either the id is wrong, OR your script ran before the element was rendered. Wrap your init in \`document.addEventListener('DOMContentLoaded', () => {...})\` OR move the \`<script>\` tag to the END of \`<body>\` (after the elements). Check that every \`getElementById\` call has a matching \`<element id="...">\` in the HTML.
+  - **Cannot read properties of undefined (reading 'X')** → an object is undefined. Add \`?.\` optional chaining or guard with \`if (obj) {...}\`.
+  - **X is not defined** → missing import, typo in variable name, or the script that defines X is loaded AFTER the script that uses X.
+  - **SyntaxError: Unexpected token** → real syntax error in YOUR code. Read the file, fix it.
+
 # RUNNER — AVAILABLE BY DEFAULT IN THIS IDE ✅
 The built-in Node Runner is configured out of the box. You CAN and SHOULD use:
 - \`exec_shell\` to run \`npm install\`, \`node server.js\`, \`node -c file.js\`, \`ls\`, \`cat\`, \`git\`, etc.
@@ -491,6 +515,7 @@ The built-in Node Runner is configured out of the box. You CAN and SHOULD use:
 The runner materialises every project file to a private workspace on disk before running the command. So \`node server.js\` will actually execute the code you just wrote with \`write_file\`.
 
 If (and only if) \`exec_shell\` ever returns \`{ "skipped": true, ... }\`, THEN the runner is offline — fall back to writing files only and call \`finish\`. Otherwise: always test the project end-to-end before calling finish.
+
 
 # HOW TO WORK (mandatory)
 1. **Understand first**: call \`list_files\` ONCE at the very start, then \`read_file\` only on files you intend to modify.
@@ -778,8 +803,53 @@ When a tool returns an error you MUST react like a senior engineer, not by retry
 
       if (appliedFileChange) onSwitchToPreview?.();
       if (sawFinish) {
-        setStatusLine("");
-        return true;
+        // ---- AUTO-FIX RUNTIME ERRORS LOOP ----
+        // The agent declared "finished" but the iframe might be throwing
+        // runtime errors. Observe them, and if any exist, send the agent
+        // back into the loop with the errors as a new user message — up to
+        // maxFixIterations times. This makes the IDE behave like a real
+        // senior dev: it doesn't ship code that crashes.
+        const checkpoint = Date.now();
+        const observed = await observeRuntime(checkpoint);
+        if (observed.length === 0) {
+          setStatusLine("");
+          return true;
+        }
+        const maxAutoFixes = Math.max(1, agentsSettings.maxFixIterations || 3);
+        for (let fixIter = 1; fixIter <= maxAutoFixes; fixIter++) {
+          if (controller.signal.aborted) break;
+          const errors = fixIter === 1 ? observed : await observeRuntime(Date.now());
+          if (errors.length === 0) break;
+          setStatusLine(
+            `🛠 Auto-fix runtime (passe ${fixIter}/${maxAutoFixes}) — ${errors.length} erreur${errors.length > 1 ? "s" : ""} détectée${errors.length > 1 ? "s" : ""}…`,
+          );
+          const errorReport = errors
+            .slice(0, 8)
+            .map((e, i) => `${i + 1}. [${e.level || "error"}] ${e.msg}`)
+            .join("\n");
+          history.push({
+            role: "user",
+            content:
+              `🚨 The preview iframe is throwing runtime errors. Fix them now — do NOT call finish again until the preview runs cleanly.\n\n` +
+              `Errors observed:\n${errorReport}\n\n` +
+              `Diagnose the root cause (often: querySelector returning null, missing DOM element, wrong id/class, async timing), patch the affected file with write_file, then call finish. Do NOT delete files.`,
+          });
+          // Reset finish flag so the agent gets to act again.
+          sawFinish = false;
+          // Reset progress counters so the auto-fix turn isn't blocked by
+          // the no-progress / repeated-failure guards.
+          nonProgressSteps = 0;
+          toolAttemptCounts.clear();
+          toolFailureCounts.clear();
+          // Make ONE more iteration of the outer for-loop. We do this by
+          // breaking out and letting the outer loop continue naturally.
+          break;
+        }
+        if (sawFinish) {
+          setStatusLine("");
+          return true;
+        }
+        // Otherwise fall through and continue the outer for-loop.
       }
     }
 
