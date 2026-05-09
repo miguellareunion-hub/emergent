@@ -23,7 +23,7 @@ const AdmZip = require("adm-zip");
 const PORT = parseInt(process.env.PORT || "7070", 10);
 const TOKEN = process.env.RUNNER_TOKEN || "";
 const WORKSPACES_DIR = path.resolve(process.env.WORKSPACES_DIR || "./workspaces");
-const APP_PORT = parseInt(process.env.APP_PORT || "3000", 10);
+const APP_PORT = parseInt(process.env.APP_PORT || "3100", 10);
 
 if (!TOKEN) {
   console.warn("⚠️  RUNNER_TOKEN is empty. The runner will refuse all requests.");
@@ -186,6 +186,22 @@ function runScript(projectId, dir, script) {
 
   (async () => {
     try {
+      // For pure browser projects (no package.json), the Node Runner has
+      // nothing to do — the iframe Preview tab handles them. Bail out
+      // immediately with a clear error so we don't kill ports the user app
+      // doesn't need or spawn `npm run X` against an empty project.
+      const hasPkg = fs.existsSync(path.join(dir, "package.json"));
+      if (!hasPkg) {
+        pushLog(
+          projectId,
+          "stderr",
+          "Aucun package.json détecté — ce projet est browser-only. Utilise l'onglet « Preview » à la place.",
+        );
+        state.status = "error";
+        broadcast(projectId, { type: "status", status: state.status });
+        return;
+      }
+
       // free APP_PORT before doing anything: a survivor from a previous run
       // (e.g. an old `node server.js` from another project) would otherwise
       // crash the new dev server with EADDRINUSE.
@@ -193,7 +209,6 @@ function runScript(projectId, dir, script) {
       await freePort(APP_PORT);
 
       // always install first if package.json exists
-      const hasPkg = fs.existsSync(path.join(dir, "package.json"));
       if (hasPkg && !isInstallOnly) {
         state.status = "installing";
         broadcast(projectId, { type: "status", status: state.status });

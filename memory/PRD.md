@@ -48,6 +48,13 @@ user-owned Ubuntu server with one script).
 - `data-testid` set on every interactive element of the new UI
 - Tested E2E: ZIP upload → files appear in FILES panel → editor opens `hello.txt` → agent uses `list_files` to confirm
 
+### 2026-02-09 — Critical Node Runner port-conflict fix
+- **Bug**: when the user clicked Run on a project, the runner spawned the user app on port 3000 — same port as the TanStack IDE itself. `freePort(3000)` killed the IDE; the iframe `/preview/:projectId/` proxy then fell back to whatever was on 3000 again (the IDE restarted by supervisor) and returned its own 404 page instead of a clear "no app running" error.
+- **Fix 1 (server.js)**: default `APP_PORT` changed from `3000` → `3100`.
+- **Fix 2 (install.sh)**: added `APP_PORT="3100"` to the runner's supervisor `environment=` line.
+- **Fix 3 (server.js)**: when no `package.json` exists, the runner aborts immediately with a clear stderr log and never calls `freePort`.
+- **Fix 4 (RunnerPanel.tsx)**: detects browser-only projects (no `package.json` in the file list) and replaces the iframe with a friendly "Projet browser-only — utilise l'onglet Preview" banner; the **Run** button is also disabled in that case.
+
 ## Endpoints
 | Method | Path | Service | Purpose |
 |--------|------|---------|---------|

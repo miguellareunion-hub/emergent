@@ -56,6 +56,13 @@ export function RunnerPanel({ projectId, files }: Props) {
   const previewUrl = `${baseUrl}/preview/${encodeURIComponent(projectId)}/`;
   const wsUrl = baseUrl.replace(/^http/, "ws") + `/ws?token=${encodeURIComponent(settings.token)}&projectId=${encodeURIComponent(projectId)}`;
 
+  /** True if this project actually has a Node entry — without one, the Node
+   * Runner has nothing to run (the iframe Preview tab handles browser-only
+   * projects). */
+  const hasPackageJson = files.some(
+    (f) => f.name === "package.json" || f.name.endsWith("/package.json"),
+  );
+
   // connect WS
   useEffect(() => {
     if (!settings.token || !settings.url) return;
@@ -280,8 +287,10 @@ export function RunnerPanel({ projectId, files }: Props) {
           ) : (
             <button
               onClick={handleRun}
-              disabled={busy}
+              disabled={busy || !hasPackageJson}
+              title={hasPackageJson ? "Démarrer le runner" : "Ajoute un package.json pour utiliser le Node Runner"}
               className="flex items-center gap-1 rounded bg-emerald-600 px-2 py-1 text-xs text-white hover:bg-emerald-500 disabled:opacity-50"
+              data-testid="runner-run-button"
             >
               {busy ? <Loader2 className="h-3 w-3 animate-spin" /> : <Play className="h-3 w-3" />}
               Run
@@ -434,12 +443,39 @@ export function RunnerPanel({ projectId, files }: Props) {
           <div className="border-b border-border bg-[var(--sidebar-bg)] px-3 py-1 text-[10px] uppercase tracking-wide text-muted-foreground">
             App preview ({previewUrl})
           </div>
-          <iframe
-            key={previewKey}
-            src={previewUrl}
-            title="runner-preview"
-            className="flex-1 bg-white"
-          />
+          {hasPackageJson ? (
+            <iframe
+              key={previewKey}
+              src={previewUrl}
+              title="runner-preview"
+              className="flex-1 bg-white"
+            />
+          ) : (
+            <div
+              className="flex flex-1 items-center justify-center bg-[var(--panel-bg)] p-8"
+              data-testid="runner-no-package-json-banner"
+            >
+              <div className="max-w-sm space-y-3 text-center">
+                <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-full border border-amber-500/30 bg-amber-500/10 text-amber-400">
+                  <Server className="h-5 w-5" />
+                </div>
+                <h3 className="text-sm font-semibold text-foreground">
+                  Projet browser-only
+                </h3>
+                <p className="text-xs leading-relaxed text-muted-foreground">
+                  Ce projet n'a pas de <code className="rounded bg-muted px-1 py-0.5">package.json</code> —
+                  le Node Runner n'a rien à exécuter. Utilise plutôt l'onglet
+                  {" "}
+                  <strong className="text-foreground">Preview</strong> en haut, qui rend
+                  les fichiers HTML/CSS/JS dans une iframe légère.
+                </p>
+                <p className="text-[11px] text-muted-foreground">
+                  Demande à l'agent IA de créer un <code>package.json</code> + un
+                  serveur Node si tu veux un vrai backend.
+                </p>
+              </div>
+            </div>
+          )}
         </div>
       </div>
     </div>

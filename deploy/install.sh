@@ -321,7 +321,7 @@ stopasgroup=true
 killasgroup=true
 stdout_logfile=/var/log/lovable-runner.out.log
 stderr_logfile=/var/log/lovable-runner.err.log
-environment=PORT="7070",RUNNER_TOKEN="$RUNNER_TOKEN_VALUE",WORKSPACES_DIR="/var/lib/lovable-runner-workspaces",HOME="/root",PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+environment=PORT="7070",APP_PORT="3100",RUNNER_TOKEN="$RUNNER_TOKEN_VALUE",WORKSPACES_DIR="/var/lib/lovable-runner-workspaces",HOME="/root",PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 EOF
 fi
