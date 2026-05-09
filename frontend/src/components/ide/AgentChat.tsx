@@ -13,8 +13,10 @@ import {
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { FileNode } from "@/lib/projects";
+import { buildPreviewDoc } from "@/lib/projects";
 import { loadAISettings } from "@/lib/aiSettings";
 import { loadAgentsSettings } from "@/lib/agentSettings";
+import { loadRunnerSettings } from "@/lib/runnerSettings";
 import { parseAgentOutput, type AgentAction } from "@/lib/agentActions";
 import {
   clearRuntimeErrors,
@@ -445,6 +447,107 @@ export function AgentChat({
   };
 
   /**
+   * QA report shape returned by /api/qa. Subset of the fields we care about
+   * inside the build loop.
+   */
+  type QAReport = {
+    status: "ok" | "warn" | "fail";
+    summary: string;
+    durationMs: number;
+    pageErrors: { message: string }[];
+    failedRequests: { url: string; method: string; status: number | null; reason: string }[];
+    console: { level: string; text: string }[];
+    ui: {
+      images: { broken: number };
+      missingExpected: string[];
+    };
+    navigation: { blank: boolean; httpStatus: number | null; title: string };
+    responsive: { mobileOverflow: boolean };
+    recommendations: string[];
+  };
+
+  /**
+   * Run the QA_AGENT against the current set of files. Returns null if the
+   * QA endpoint can't be reached (offline / unsupported) so the caller can
+   * fall back gracefully.
+   */
+  const runQAValidation = async (
+    signal: AbortSignal,
+  ): Promise<QAReport | null> => {
+    try {
+      setStatusLine("🤖 QA_AGENT teste l'app dans Chromium…");
+      const runner = loadRunnerSettings();
+      const html = buildPreviewDoc(getLatestFiles());
+      const res = await fetch("/api/qa", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${runner.token || "lovable-ide-local"}`,
+        },
+        body: JSON.stringify({ html, testMobile: true, timeoutMs: 9000 }),
+        signal,
+      });
+      if (!res.ok) return null;
+      return (await res.json()) as QAReport;
+    } catch {
+      return null;
+    }
+  };
+
+  /**
+   * Compose a single user-message that bundles whatever runtime errors the
+   * iframe captured AND whatever the QA_AGENT found, so the agent can fix
+   * everything in one targeted next pass.
+   */
+  const buildAutoFixPrompt = (
+    runtimeErrors: RuntimeError[],
+    qa: QAReport | null,
+  ): string => {
+    const sections: string[] = [
+      "🚨 The build is NOT validated yet. Fix the issues below and call `finish` again. Do NOT delete files.",
+    ];
+    if (runtimeErrors.length > 0) {
+      sections.push(
+        "**Runtime errors observed in the preview iframe:**\n" +
+          runtimeErrors
+            .slice(0, 8)
+            .map((e, i) => `${i + 1}. [${e.level || "error"}] ${e.msg}`)
+            .join("\n"),
+      );
+    }
+    if (qa) {
+      sections.push(`**QA_AGENT verdict:** ${qa.summary}`);
+      if (qa.pageErrors.length > 0)
+        sections.push(
+          "**JS runtime errors (Playwright):**\n" +
+            qa.pageErrors.slice(0, 5).map((e, i) => `${i + 1}. ${e.message}`).join("\n"),
+        );
+      if (qa.failedRequests.length > 0)
+        sections.push(
+          "**Failed network requests:**\n" +
+            qa.failedRequests
+              .slice(0, 5)
+              .map((r, i) => `${i + 1}. ${r.method} ${r.url} → ${r.status ?? "?"} (${r.reason})`)
+              .join("\n"),
+        );
+      if (qa.navigation.blank) sections.push("**Page apparaît BLANCHE** — le DOM est vide ou non rendu.");
+      if (qa.responsive.mobileOverflow) sections.push("**Layout cassé sur mobile (375px)** — débordement horizontal détecté.");
+      if (qa.ui.images.broken > 0) sections.push(`**${qa.ui.images.broken} image(s) cassée(s)** — vérifie les chemins src=.`);
+      if (qa.ui.missingExpected.length > 0)
+        sections.push(`**Éléments UI manquants :** ${qa.ui.missingExpected.join(", ")}`);
+      if (qa.recommendations.length > 0)
+        sections.push(
+          "**Actions recommandées :**\n" +
+            qa.recommendations.map((r) => `- ${r}`).join("\n"),
+        );
+    }
+    sections.push(
+      "Diagnose the root cause for each issue, patch ONLY the file(s) that need to change with `write_file` (full content), then call `finish`. The QA_AGENT will re-validate.",
+    );
+    return sections.join("\n\n");
+  };
+
+  /**
    * Native-tool-calling loop. The agent receives JSON-schema tool definitions
    * (read_file, write_file, exec_shell, web_search, …) and we run them in a
    * loop until it calls `finish` or hits the iteration cap.
@@ -501,16 +604,22 @@ You are not a code-suggestion bot. You are a senior engineer who SHIPS WORKING p
 - Querying a DOM element that doesn't exist (\`Cannot set properties of null\`) is YOUR fault — your script ran before the element existed, OR the id is wrong, OR the element was never created. Find the root cause.
 - "It probably works" is not acceptable. Verify.
 
-# 🚨 RUNTIME ERROR AUTO-FIX (this is critical)
-After you call \`finish\`, the IDE automatically observes the iframe preview for runtime errors and feeds them back to you. This means:
-- You CAN call \`finish\` once you've written all files. The system will show you any runtime crashes.
-- If runtime errors come back as a follow-up user message starting with "🚨", DO NOT panic, DO NOT delete files. Just:
-  1. Read each error carefully.
-  2. Identify which file is at fault (the error usually points to a function/file).
-  3. \`read_file\` if you don't remember the exact code.
-  4. \`write_file\` with the fix (full file content).
-  5. Call \`finish\` again. The system will re-check.
-- The most common runtime errors and their fix:
+# 🤖 QA_AGENT AUTO-VALIDATION (this is critical)
+After you call \`finish\`, the system AUTOMATICALLY runs:
+  1. A live runtime-error scan on the preview iframe.
+  2. The **QA_AGENT** — a real headless Chromium (Playwright) that opens the project, observes 1.5s, then reports every detectable problem: blank page, JS errors, broken images, failed network requests, missing UI elements, responsive overflow at 375px, etc.
+
+This means:
+- You CAN safely call \`finish\` once you've written all files. The QA_AGENT will tell you what's broken.
+- If issues come back as a follow-up user message starting with "🚨", DO NOT panic, DO NOT delete files. Just:
+  1. Read each problem carefully (the message lists JS errors, failed requests, missing elements, responsive issues, recommendations).
+  2. Identify the root cause file by file.
+  3. \`read_file\` if needed.
+  4. \`write_file\` ONLY the file(s) that fix the listed problems.
+  5. Call \`finish\` again. The QA_AGENT will re-validate.
+- Only when the QA_AGENT returns "✅ Project loaded cleanly with no detectable issues" is the build truly done.
+
+# 🚨 COMMON QA FINDINGS AND THEIR FIXES
   - **Cannot set properties of null (setting 'textContent')** → \`document.getElementById('foo')\` returned null. Either the id is wrong, OR your script ran before the element was rendered. Wrap your init in \`document.addEventListener('DOMContentLoaded', () => {...})\` OR move the \`<script>\` tag to the END of \`<body>\` (after the elements). Check that every \`getElementById\` call has a matching \`<element id="...">\` in the HTML.
   - **Cannot read properties of undefined (reading 'X')** → an object is undefined. Add \`?.\` optional chaining or guard with \`if (obj) {...}\`.
   - **X is not defined** → missing import, typo in variable name, or the script that defines X is loaded AFTER the script that uses X.
@@ -812,46 +921,47 @@ When a tool returns an error you MUST react like a senior engineer, not by retry
 
       if (appliedFileChange) onSwitchToPreview?.();
       if (sawFinish) {
-        // ---- AUTO-FIX RUNTIME ERRORS LOOP ----
-        // The agent declared "finished" but the iframe might be throwing
-        // runtime errors. Observe them, and if any exist, send the agent
-        // back into the loop with the errors as a new user message — up to
-        // maxFixIterations times. This makes the IDE behave like a real
-        // senior dev: it doesn't ship code that crashes.
-        const checkpoint = Date.now();
-        const observed = await observeRuntime(checkpoint);
-        if (observed.length === 0) {
+        // ---- AUTO-VALIDATION CYCLE ----
+        // The agent declared "finished". We now run TWO validations before
+        // declaring success:
+        //   1. Quick runtime-error scan from the live preview iframe.
+        //   2. Full QA_AGENT pass — Playwright opens the project in a real
+        //      headless Chromium and reports every detectable problem
+        //      (blank page, JS errors, broken images, responsive overflow,
+        //      missing UI elements, failed requests, ...).
+        // If either step reports issues, we feed them back to the agent and
+        // let it loop — up to maxFixIterations times.
+        const observed = await observeRuntime(Date.now());
+        const qaReport = await runQAValidation(controller.signal);
+        const hasIssues =
+          observed.length > 0 || (qaReport && qaReport.status !== "ok");
+        if (!hasIssues) {
+          if (qaReport) {
+            visibleContent +=
+              `\n\n${qaReport.summary} _(QA_AGENT validated the build in ${qaReport.durationMs}ms)_`;
+            updateBubble();
+          }
           setStatusLine("");
           return true;
         }
         const maxAutoFixes = Math.max(1, agentsSettings.maxFixIterations || 3);
         for (let fixIter = 1; fixIter <= maxAutoFixes; fixIter++) {
           if (controller.signal.aborted) break;
-          const errors = fixIter === 1 ? observed : await observeRuntime(Date.now());
-          if (errors.length === 0) break;
+          const liveErrors = fixIter === 1 ? observed : await observeRuntime(Date.now());
+          const qa =
+            fixIter === 1 ? qaReport : await runQAValidation(controller.signal);
+          const stillIssues =
+            liveErrors.length > 0 || (qa && qa.status !== "ok");
+          if (!stillIssues) break;
           setStatusLine(
-            `🛠 Auto-fix runtime (passe ${fixIter}/${maxAutoFixes}) — ${errors.length} erreur${errors.length > 1 ? "s" : ""} détectée${errors.length > 1 ? "s" : ""}…`,
+            `🛠 QA_AGENT auto-fix (passe ${fixIter}/${maxAutoFixes}) — ${qa?.recommendations.length ?? liveErrors.length} problème(s)…`,
           );
-          const errorReport = errors
-            .slice(0, 8)
-            .map((e, i) => `${i + 1}. [${e.level || "error"}] ${e.msg}`)
-            .join("\n");
-          history.push({
-            role: "user",
-            content:
-              `🚨 The preview iframe is throwing runtime errors. Fix them now — do NOT call finish again until the preview runs cleanly.\n\n` +
-              `Errors observed:\n${errorReport}\n\n` +
-              `Diagnose the root cause (often: querySelector returning null, missing DOM element, wrong id/class, async timing), patch the affected file with write_file, then call finish. Do NOT delete files.`,
-          });
-          // Reset finish flag so the agent gets to act again.
+          const fixPrompt = buildAutoFixPrompt(liveErrors, qa);
+          history.push({ role: "user", content: fixPrompt });
           sawFinish = false;
-          // Reset progress counters so the auto-fix turn isn't blocked by
-          // the no-progress / repeated-failure guards.
           nonProgressSteps = 0;
           toolAttemptCounts.clear();
           toolFailureCounts.clear();
-          // Make ONE more iteration of the outer for-loop. We do this by
-          // breaking out and letting the outer loop continue naturally.
           break;
         }
         if (sawFinish) {
