@@ -231,12 +231,18 @@ app.get("/api/health", (_req, res) => res.json({
  */
 app.post("/api/exec", checkAuth, async (req, res) => {
   try {
-    const { projectId, command, cwd, timeoutMs } = req.body || {};
+    const { projectId, command, cwd, timeoutMs, files } = req.body || {};
     if (!projectId || typeof command !== "string" || !command.trim()) {
       return res.status(400).json({ error: "projectId and command required" });
     }
     const dir = safeProjectDir(projectId);
     await fsp.mkdir(dir, { recursive: true });
+    // Optionally sync inline files into the workspace before running.
+    // The IDE's agent uses this so it doesn't have to make a separate
+    // /api/sync round-trip before every command.
+    if (Array.isArray(files) && files.length > 0) {
+      await writeFiles(dir, files);
+    }
     const finalCwd = cwd
       ? path.join(dir, String(cwd).replace(/^[/\\]+/, ""))
       : dir;

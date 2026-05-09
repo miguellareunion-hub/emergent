@@ -21,8 +21,28 @@ mongo_url = os.environ['MONGO_URL']
 client = AsyncIOMotorClient(mongo_url)
 db = client[os.environ['DB_NAME']]
 
-# TanStack Start dev server (Vite) where Lovable IDE API routes live.
+# --- routing matrix for the public /api/* surface ---
+# /api/chat, /api/web-search → TanStack Start (Vite, :3000) — these are
+#   high-level IDE features (LLM proxy, web search).
+# /api/(exec|http-fetch|run|sync|stop|status|health|read-file|list-files)
+#   → runner-server (:7070) — Node child-process / project lifecycle runner.
+# /preview/{projectId}/* and /ws → runner-server too (live preview iframe
+#   and WebSocket log stream).
 TANSTACK_BASE = os.environ.get("TANSTACK_BASE", "http://localhost:3000")
+RUNNER_BASE = os.environ.get("RUNNER_BASE", "http://localhost:7070")
+
+TANSTACK_API_PATHS = {"chat", "web-search"}
+RUNNER_API_PATHS = {
+    "exec",
+    "http-fetch",
+    "run",
+    "sync",
+    "stop",
+    "status",
+    "health",
+    "read-file",
+    "list-files",
+}
 
 # Create the main app without a prefix
 app = FastAPI()
@@ -77,12 +97,9 @@ app.include_router(api_router)
 # Routes that the Lovable IDE TanStack Start app exposes under /api/ — we
 # forward them to localhost:3000 so the public ingress (which routes /api/*
 # to this FastAPI process) can still reach them.
-TANSTACK_API_PATHS = {
-    "chat",
-    "exec",
-    "http-fetch",
-    "web-search",
-}
+# Routes that the Lovable IDE TanStack Start app exposes under /api/ — we
+# forward them to localhost:3000 so the public ingress (which routes /api/*
+# to this FastAPI process) can still reach them.
 
 
 @app.api_route(
@@ -91,20 +108,41 @@ TANSTACK_API_PATHS = {
     include_in_schema=False,
 )
 async def tanstack_proxy(full_path: str, request: Request):
-    """Forward unknown /api/* requests to the TanStack Start dev server.
+    """Forward unknown /api/* requests to the right upstream service.
 
-    Uses streaming so SSE responses (e.g. /api/chat with stream=true) flow
-    through correctly without buffering. The first path segment is checked
-    against an allow-list to keep this proxy narrow.
+    /api/chat & /api/web-search go to TanStack Start (Vite SSR app on :3000).
+    Runner-related endpoints go to the local Node Runner on :7070. Anything
+    else under /api/ that we don't explicitly route is 404'd here so we don't
+    accidentally bypass the FastAPI native routes registered above.
     """
     first_seg = full_path.split("/", 1)[0]
-    if first_seg not in TANSTACK_API_PATHS:
-        return Response(status_code=404, content='{"detail":"Not Found"}',
-                        media_type="application/json")
+    if first_seg in TANSTACK_API_PATHS:
+        upstream_base = TANSTACK_BASE
+    elif first_seg in RUNNER_API_PATHS:
+        upstream_base = RUNNER_BASE
+    else:
+        return Response(
+            status_code=404,
+            content='{"detail":"Not Found"}',
+            media_type="application/json",
+        )
+    return await _forward(upstream_base, f"/api/{full_path}", request)
 
-    target = f"{TANSTACK_BASE.rstrip('/')}/api/{full_path}"
+
+@app.api_route(
+    "/preview/{full_path:path}",
+    methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
+    include_in_schema=False,
+)
+async def runner_preview_proxy(full_path: str, request: Request):
+    """Forward /preview/{projectId}/... to the runner-server, which itself
+    proxies the request to the user's running Node app on its dynamic port."""
+    return await _forward(RUNNER_BASE, f"/preview/{full_path}", request)
+
+
+async def _forward(upstream_base: str, target_path: str, request: Request) -> Response:
+    target = f"{upstream_base.rstrip('/')}{target_path}"
     body = await request.body()
-    # Strip hop-by-hop and ingress-injected headers that confuse the upstream.
     drop = {"host", "content-length", "connection", "transfer-encoding"}
     fwd_headers = {k: v for k, v in request.headers.items() if k.lower() not in drop}
 

@@ -45,15 +45,31 @@ export function PreviewPane({ files, onConsole }: Props) {
           </button>
           <button
             onClick={() => {
-              const w = window.open();
-              if (w) {
-                w.document.open();
-                w.document.write(doc);
-                w.document.close();
+              // Convert the inlined preview document to a Blob URL so the new
+              // tab gets a proper URL (blob:https://…) instead of staying on
+              // "about:blank" — which is what `window.open()` + `document.write`
+              // produces on modern browsers, especially mobile.
+              try {
+                const blob = new Blob([doc], { type: "text/html" });
+                const url = URL.createObjectURL(blob);
+                const w = window.open(url, "_blank", "noopener,noreferrer");
+                if (!w) {
+                  // Popup blocked — fall back to navigating the current tab.
+                  alert(
+                    "Le navigateur a bloqué la nouvelle fenêtre. Autorise les popups pour ce site et réessaie.",
+                  );
+                  URL.revokeObjectURL(url);
+                  return;
+                }
+                // Revoke after a delay so the new tab has time to load.
+                setTimeout(() => URL.revokeObjectURL(url), 60_000);
+              } catch (e) {
+                console.error("Open in new tab failed:", e);
               }
             }}
             className="rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground"
             title="Open in new tab"
+            data-testid="preview-open-tab-btn"
           >
             <ExternalLink className="h-4 w-4" />
           </button>
