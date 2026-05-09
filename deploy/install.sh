@@ -84,23 +84,42 @@ fi
 #---------------------------------------------------------------------- mongo
 if [ "$SKIP_MONGO" != "1" ]; then
   if ! command -v mongod >/dev/null 2>&1; then
-    log "Installing MongoDB 7.0"
-    curl -fsSL https://www.mongodb.org/static/pgp/server-7.0.asc \
-      | gpg -o /usr/share/keyrings/mongodb-server-7.0.gpg --dearmor --yes
     UB_CODENAME="$(. /etc/os-release && echo "$VERSION_CODENAME")"
+    # Pick a MongoDB major version that supports the running Ubuntu release.
+    # 8.0 → focal/jammy/noble. 7.0 → focal/jammy. 6.0 → bionic/focal/jammy.
     case "$UB_CODENAME" in
-      jammy|noble) ;;
-      *) UB_CODENAME="jammy" ;;  # safe default
+      noble)              MONGO_MAJOR="8.0" ;;
+      jammy|focal)        MONGO_MAJOR="8.0" ;;
+      bionic)             MONGO_MAJOR="6.0" ;;
+      *)                  MONGO_MAJOR="8.0"; UB_CODENAME="jammy" ;;
     esac
-    echo "deb [ arch=amd64,arm64 signed-by=/usr/share/keyrings/mongodb-server-7.0.gpg ] https://repo.mongodb.org/apt/ubuntu ${UB_CODENAME}/mongodb-org/7.0 multiverse" \
-      > /etc/apt/sources.list.d/mongodb-org-7.0.list
-    apt-get update -qq
-    apt-get install -yqq mongodb-org
-    systemctl enable mongod
-    systemctl start mongod
+    log "Installing MongoDB ${MONGO_MAJOR} for Ubuntu ${UB_CODENAME}"
+    curl -fsSL "https://www.mongodb.org/static/pgp/server-${MONGO_MAJOR}.asc" \
+      | gpg -o "/usr/share/keyrings/mongodb-server-${MONGO_MAJOR}.gpg" --dearmor --yes
+    ARCH="$(dpkg --print-architecture)"
+    case "$ARCH" in amd64|arm64) ;; *) ARCH="amd64" ;; esac
+    echo "deb [ arch=${ARCH} signed-by=/usr/share/keyrings/mongodb-server-${MONGO_MAJOR}.gpg ] https://repo.mongodb.org/apt/ubuntu ${UB_CODENAME}/mongodb-org/${MONGO_MAJOR} multiverse" \
+      > /etc/apt/sources.list.d/mongodb-org-${MONGO_MAJOR}.list
+    # Noble dropped libssl1.1 — MongoDB 8 ships its own deps. Try install,
+    # fallback to distro mongodb if the repo is unavailable.
+    if ! ( apt-get update -qq && apt-get install -yqq mongodb-org ); then
+      warn "MongoDB ${MONGO_MAJOR} apt repo failed — falling back to distro 'mongodb' package"
+      rm -f /etc/apt/sources.list.d/mongodb-org-${MONGO_MAJOR}.list
+      apt-get update -qq
+      apt-get install -yqq mongodb || apt-get install -yqq mongodb-server || {
+        err "Could not install any MongoDB. Pass --skip-mongo if you'll provide it externally."
+        exit 3
+      }
+    fi
+    systemctl enable mongod 2>/dev/null || systemctl enable mongodb 2>/dev/null || true
+    systemctl start mongod 2>/dev/null || systemctl start mongodb 2>/dev/null || true
   fi
-  systemctl is-active --quiet mongod || systemctl start mongod
-  log "mongod is up"
+  systemctl is-active --quiet mongod 2>/dev/null \
+    || systemctl is-active --quiet mongodb 2>/dev/null \
+    || systemctl start mongod 2>/dev/null \
+    || systemctl start mongodb 2>/dev/null \
+    || warn "MongoDB does not seem to be running; check 'systemctl status mongod'"
+  log "MongoDB ready"
 fi
 
 #--------------------------------------------------------------------- repo
