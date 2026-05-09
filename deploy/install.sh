@@ -177,6 +177,41 @@ if ! jq -e '.scripts.start' "$FRONTEND_DIR/package.json" >/dev/null 2>&1; then
   mv "$tmp" "$FRONTEND_DIR/package.json"
 fi
 
+# Playwright (used by the QA_AGENT to drive a real Chromium against the
+# generated app). Browsers are downloaded into a project-local folder so the
+# install is self-contained and supervisor doesn't need a global Chrome.
+log "Installing Playwright + Chromium for QA_AGENT"
+( cd "$FRONTEND_DIR" && yarn add --ignore-engines playwright >/dev/null 2>&1 || true )
+log "Installing Playwright system deps (libnss3, libatk, etc.)"
+apt-get install -yqq \
+  libnss3 libnspr4 libatk1.0-0t64 libatk-bridge2.0-0t64 libcups2t64 \
+  libdrm2 libxkbcommon0 libxcomposite1 libxdamage1 libxfixes3 libxrandr2 \
+  libgbm1 libpango-1.0-0 libcairo2 libasound2t64 libxshmfence1 \
+  fonts-liberation libgtk-3-0t64 2>/dev/null \
+  || apt-get install -yqq \
+       libnss3 libnspr4 libatk1.0-0 libatk-bridge2.0-0 libcups2 \
+       libdrm2 libxkbcommon0 libxcomposite1 libxdamage1 libxfixes3 libxrandr2 \
+       libgbm1 libpango-1.0-0 libcairo2 libasound2 libxshmfence1 \
+       fonts-liberation libgtk-3-0 \
+  || warn "Some Playwright system deps failed to install — QA_AGENT may not work."
+
+PLAYWRIGHT_BROWSERS_PATH_VAL="$FRONTEND_DIR/.playwright-browsers"
+log "Downloading Chromium headless shell to $PLAYWRIGHT_BROWSERS_PATH_VAL"
+( cd "$FRONTEND_DIR" && \
+    PLAYWRIGHT_BROWSERS_PATH="$PLAYWRIGHT_BROWSERS_PATH_VAL" \
+    "$FRONTEND_DIR/node_modules/.bin/playwright" install chromium 2>&1 | tail -3 \
+) || warn "Playwright browser download failed — QA_AGENT panel won't work until you run: cd $FRONTEND_DIR && PLAYWRIGHT_BROWSERS_PATH=$PLAYWRIGHT_BROWSERS_PATH_VAL ./node_modules/.bin/playwright install chromium"
+
+# Node Runner — the persistent process manager that runs user projects
+# (npm install, npm start) and proxies their HTTP traffic back to the iframe
+# preview. Lives at runner-server/ inside the frontend folder.
+RUNNER_DIR=""
+if [ -d "$FRONTEND_DIR/runner-server" ]; then
+  RUNNER_DIR="$FRONTEND_DIR/runner-server"
+  log "Installing runner-server dependencies"
+  ( cd "$RUNNER_DIR" && yarn install --silent )
+fi
+
 RUNNER_TOKEN_VALUE="$(openssl rand -hex 24 2>/dev/null || head -c 32 /dev/urandom | base64 | tr -dc 'a-zA-Z0-9' | head -c 32)"
 PUBLIC_URL_DEFAULT="http://$(hostname -I 2>/dev/null | awk '{print $1}' || echo localhost)"
 PUBLIC_URL="${PUBLIC_URL:-$PUBLIC_URL_DEFAULT}"
@@ -189,11 +224,17 @@ EMERGENT_LLM_KEY=$EMERGENT_KEY
 INTEGRATION_PROXY_URL=https://integrations.emergentagent.com
 APP_URL=$PUBLIC_URL
 RUNNER_TOKEN=$RUNNER_TOKEN_VALUE
+PLAYWRIGHT_BROWSERS_PATH=$PLAYWRIGHT_BROWSERS_PATH_VAL
 EOF
 else
-  # Replace RUNNER_TOKEN value (other vars left untouched).
+  # Replace RUNNER_TOKEN value and ensure PLAYWRIGHT_BROWSERS_PATH is set.
   sed -i "s|^RUNNER_TOKEN=.*|RUNNER_TOKEN=$RUNNER_TOKEN_VALUE|" "$FRONTEND_DIR/.env" \
     || echo "RUNNER_TOKEN=$RUNNER_TOKEN_VALUE" >> "$FRONTEND_DIR/.env"
+  if grep -q "^PLAYWRIGHT_BROWSERS_PATH=" "$FRONTEND_DIR/.env"; then
+    sed -i "s|^PLAYWRIGHT_BROWSERS_PATH=.*|PLAYWRIGHT_BROWSERS_PATH=$PLAYWRIGHT_BROWSERS_PATH_VAL|" "$FRONTEND_DIR/.env"
+  else
+    echo "PLAYWRIGHT_BROWSERS_PATH=$PLAYWRIGHT_BROWSERS_PATH_VAL" >> "$FRONTEND_DIR/.env"
+  fi
 fi
 
 #------------------------------------------------------------------- backend
@@ -204,6 +245,8 @@ if [ -n "$BACKEND_DIR" ]; then
   source "$BACKEND_DIR/.venv/bin/activate"
   pip install -q --upgrade pip
   pip install -q -r "$BACKEND_DIR/requirements.txt"
+  # Required by the FastAPI proxy that forwards /api/{chat,exec,run,...}
+  # to the right upstream (TanStack Start :3000 or runner-server :7070).
   pip install -q httpx
   deactivate
 
@@ -214,7 +257,11 @@ MONGO_URL=mongodb://127.0.0.1:27017
 DB_NAME=lovable_ide
 CORS_ORIGINS=*
 TANSTACK_BASE=http://127.0.0.1:3000
+RUNNER_BASE=http://127.0.0.1:7070
 EOF
+  else
+    grep -q "^RUNNER_BASE=" "$BACKEND_DIR/.env" || \
+      echo "RUNNER_BASE=http://127.0.0.1:7070" >> "$BACKEND_DIR/.env"
   fi
 fi
 
@@ -230,7 +277,7 @@ stopasgroup=true
 killasgroup=true
 stdout_logfile=/var/log/lovable-frontend.out.log
 stderr_logfile=/var/log/lovable-frontend.err.log
-environment=HOST="0.0.0.0",PORT="3000",NODE_ENV="production",HOME="/root"
+environment=HOST="0.0.0.0",PORT="3000",NODE_ENV="production",HOME="/root",PLAYWRIGHT_BROWSERS_PATH="$PLAYWRIGHT_BROWSERS_PATH_VAL"
 
 EOF
 
@@ -245,12 +292,32 @@ stopasgroup=true
 killasgroup=true
 stdout_logfile=/var/log/lovable-backend.out.log
 stderr_logfile=/var/log/lovable-backend.err.log
+
 EOF
+fi
+
+if [ -n "$RUNNER_DIR" ]; then
+cat >> /etc/supervisor/conf.d/lovable-ide.conf <<EOF
+[program:lovable-runner]
+command=/usr/bin/node server.js
+directory=$RUNNER_DIR
+autostart=true
+autorestart=true
+stopasgroup=true
+killasgroup=true
+stdout_logfile=/var/log/lovable-runner.out.log
+stderr_logfile=/var/log/lovable-runner.err.log
+environment=PORT="7070",RUNNER_TOKEN="$RUNNER_TOKEN_VALUE",WORKSPACES_DIR="/var/lib/lovable-runner-workspaces",HOME="/root"
+EOF
+mkdir -p /var/lib/lovable-runner-workspaces
 fi
 
 supervisorctl reread
 supervisorctl update
-supervisorctl restart lovable-frontend ${BACKEND_DIR:+lovable-backend} || true
+supervisorctl restart \
+  lovable-frontend \
+  ${BACKEND_DIR:+lovable-backend} \
+  ${RUNNER_DIR:+lovable-runner} || true
 
 #--------------------------------------------------------------------- nginx
 log "Writing /etc/nginx/sites-available/lovable-ide"
@@ -262,12 +329,30 @@ cat > /etc/nginx/sites-available/lovable-ide <<EOF
 # to TanStack Start so the SSR/HMR client app loads normally.
 
 map \$request_uri \$lovable_upstream {
-    default                          http://127.0.0.1:3000;
-    "~^/api/chat(\\?|/|\$)"          http://127.0.0.1:3000;
-    "~^/api/exec(\\?|/|\$)"          http://127.0.0.1:3000;
-    "~^/api/http-fetch(\\?|/|\$)"    http://127.0.0.1:3000;
-    "~^/api/web-search(\\?|/|\$)"    http://127.0.0.1:3000;
-    "~^/api/"                        http://127.0.0.1:8001;
+    default                                       http://127.0.0.1:3000;
+
+    # IDE features served by TanStack Start (Vite SSR app on :3000):
+    "~^/api/chat(\\?|/|\$)"                       http://127.0.0.1:3000;
+    "~^/api/web-search(\\?|/|\$)"                 http://127.0.0.1:3000;
+    "~^/api/qa(\\?|/|\$)"                         http://127.0.0.1:3000;
+
+    # Node Runner endpoints served by runner-server (:7070): one-shot exec,
+    # http fetch, project run/sync/stop/status/health, plus the proxied app
+    # preview at /preview/{projectId}/* and the WebSocket log stream.
+    "~^/api/exec(\\?|/|\$)"                       http://127.0.0.1:7070;
+    "~^/api/http-fetch(\\?|/|\$)"                 http://127.0.0.1:7070;
+    "~^/api/run(\\?|/|\$)"                        http://127.0.0.1:7070;
+    "~^/api/sync(\\?|/|\$)"                       http://127.0.0.1:7070;
+    "~^/api/stop(\\?|/|\$)"                       http://127.0.0.1:7070;
+    "~^/api/status(\\?|/|\$)"                     http://127.0.0.1:7070;
+    "~^/api/health(\\?|/|\$)"                     http://127.0.0.1:7070;
+    "~^/api/read-file(\\?|/|\$)"                  http://127.0.0.1:7070;
+    "~^/api/list-files(\\?|/|\$)"                 http://127.0.0.1:7070;
+    "~^/preview/"                                 http://127.0.0.1:7070;
+    "~^/ws(\\?|\$)"                               http://127.0.0.1:7070;
+
+    # Anything else under /api/ (status_check, etc.) → FastAPI on :8001.
+    "~^/api/"                                     http://127.0.0.1:8001;
 }
 
 server {
@@ -321,16 +406,26 @@ echo " Lovable IDE installed."
 echo "   Public URL : ${PUBLIC_URL}"
 echo "   Frontend   : http://127.0.0.1:3000  (supervisor: lovable-frontend)"
 [ -n "$BACKEND_DIR" ] && echo "   Backend    : http://127.0.0.1:8001  (supervisor: lovable-backend)"
+[ -n "$RUNNER_DIR" ]  && echo "   Runner     : http://127.0.0.1:7070  (supervisor: lovable-runner)"
 echo "   App dir    : $APP_DIR"
 echo "   Runner tok : $RUNNER_TOKEN_VALUE"
 echo ""
+echo " Components installed:"
+echo "   ✓ Frontend (TanStack Start + Vite + React 19)"
+[ -n "$BACKEND_DIR" ] && echo "   ✓ Backend (FastAPI + httpx proxy)"
+[ -n "$RUNNER_DIR" ]  && echo "   ✓ Node Runner (Express + ws + http-proxy-middleware)"
+echo "   ✓ QA_AGENT (Playwright + Chromium headless)"
+echo "   ✓ MongoDB (project metadata)"
+echo "   ✓ Nginx (reverse proxy with smart /api routing)"
+echo ""
 echo " Next steps:"
 echo "   1. Open $PUBLIC_URL in your browser."
-echo "   2. In the IDE, go to Settings → Runner and paste the token above"
-echo "      (or leave it blank — the default 'lovable-ide-local' is generic)."
+echo "   2. (Optional) Settings → Runner: paste the token above."
 echo "   3. Edit $FRONTEND_DIR/.env to set EMERGENT_LLM_KEY (or any provider key)."
 echo "      sudo supervisorctl restart lovable-frontend"
-echo "   4. Logs:"
-echo "      tail -f /var/log/lovable-frontend.out.log"
-[ -n "$BACKEND_DIR" ] && echo "      tail -f /var/log/lovable-backend.out.log"
+echo ""
+echo " Logs:"
+echo "   tail -f /var/log/lovable-frontend.out.log"
+[ -n "$BACKEND_DIR" ] && echo "   tail -f /var/log/lovable-backend.out.log"
+[ -n "$RUNNER_DIR" ]  && echo "   tail -f /var/log/lovable-runner.out.log"
 echo "=================================================================="
