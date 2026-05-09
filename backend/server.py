@@ -1,4 +1,5 @@
-from fastapi import FastAPI, APIRouter
+from fastapi import FastAPI, APIRouter, Request
+from fastapi.responses import Response, StreamingResponse
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -9,6 +10,7 @@ from pydantic import BaseModel, Field, ConfigDict
 from typing import List
 import uuid
 from datetime import datetime, timezone
+import httpx
 
 
 ROOT_DIR = Path(__file__).parent
@@ -18,6 +20,9 @@ load_dotenv(ROOT_DIR / '.env')
 mongo_url = os.environ['MONGO_URL']
 client = AsyncIOMotorClient(mongo_url)
 db = client[os.environ['DB_NAME']]
+
+# TanStack Start dev server (Vite) where Lovable IDE API routes live.
+TANSTACK_BASE = os.environ.get("TANSTACK_BASE", "http://localhost:3000")
 
 # Create the main app without a prefix
 app = FastAPI()
@@ -68,6 +73,81 @@ async def get_status_checks():
 
 # Include the router in the main app
 app.include_router(api_router)
+
+# Routes that the Lovable IDE TanStack Start app exposes under /api/ — we
+# forward them to localhost:3000 so the public ingress (which routes /api/*
+# to this FastAPI process) can still reach them.
+TANSTACK_API_PATHS = {
+    "chat",
+    "exec",
+    "http-fetch",
+    "web-search",
+}
+
+
+@app.api_route(
+    "/api/{full_path:path}",
+    methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
+    include_in_schema=False,
+)
+async def tanstack_proxy(full_path: str, request: Request):
+    """Forward unknown /api/* requests to the TanStack Start dev server.
+
+    Uses streaming so SSE responses (e.g. /api/chat with stream=true) flow
+    through correctly without buffering. The first path segment is checked
+    against an allow-list to keep this proxy narrow.
+    """
+    first_seg = full_path.split("/", 1)[0]
+    if first_seg not in TANSTACK_API_PATHS:
+        return Response(status_code=404, content='{"detail":"Not Found"}',
+                        media_type="application/json")
+
+    target = f"{TANSTACK_BASE.rstrip('/')}/api/{full_path}"
+    body = await request.body()
+    # Strip hop-by-hop and ingress-injected headers that confuse the upstream.
+    drop = {"host", "content-length", "connection", "transfer-encoding"}
+    fwd_headers = {k: v for k, v in request.headers.items() if k.lower() not in drop}
+
+    client = httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=10.0))
+    try:
+        upstream = await client.send(
+            client.build_request(
+                request.method,
+                target,
+                content=body if body else None,
+                headers=fwd_headers,
+                params=dict(request.query_params),
+            ),
+            stream=True,
+        )
+    except httpx.RequestError as e:
+        await client.aclose()
+        return Response(
+            status_code=502,
+            content=f'{{"detail":"Upstream error: {e}"}}',
+            media_type="application/json",
+        )
+
+    resp_headers = {
+        k: v
+        for k, v in upstream.headers.items()
+        if k.lower() not in {"content-length", "transfer-encoding", "connection"}
+    }
+
+    async def streamer():
+        try:
+            async for chunk in upstream.aiter_raw():
+                yield chunk
+        finally:
+            await upstream.aclose()
+            await client.aclose()
+
+    return StreamingResponse(
+        streamer(),
+        status_code=upstream.status_code,
+        headers=resp_headers,
+        media_type=upstream.headers.get("content-type"),
+    )
 
 app.add_middleware(
     CORSMiddleware,
