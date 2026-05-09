@@ -18,6 +18,7 @@ const path = require("path");
 const { spawn } = require("child_process");
 const { WebSocketServer } = require("ws");
 const { createProxyMiddleware } = require("http-proxy-middleware");
+const AdmZip = require("adm-zip");
 
 const PORT = parseInt(process.env.PORT || "7070", 10);
 const TOKEN = process.env.RUNNER_TOKEN || "";
@@ -38,7 +39,7 @@ const sockets = new Map();
 
 const app = express();
 app.use(cors({ origin: true, credentials: false }));
-app.use(express.json({ limit: "25mb" }));
+app.use(express.json({ limit: "100mb" }));
 
 // --- auth -----------------------------------------------------------------
 function checkAuth(req, res, next) {
@@ -221,8 +222,130 @@ app.get("/api/health", (_req, res) => res.json({
   ok: true,
   hasToken: !!TOKEN,
   // Advertise capabilities so the IDE knows which agent tools it can offer.
-  capabilities: ["run", "stop", "sync", "exec", "read-file", "list-files", "http-fetch"],
+  capabilities: ["run", "stop", "sync", "exec", "read-file", "list-files", "http-fetch", "extract-zip"],
 }));
+
+/**
+ * Extract a ZIP archive into the project workspace.
+ * Body: { projectId, zipBase64, filename?, stripRoot? }
+ * Returns: { ok, filename, totalEntries, files: [{path, size, isText, content?}] }
+ *
+ * `content` is only returned for TEXT files smaller than 256KB so the IDE can
+ * load them into the editor / project state. Binary files (images, fonts,
+ * archives, compiled code) are extracted to disk but not returned in the
+ * response — the agent can still reference them by path and `exec_shell`
+ * commands (`node`, `npm`) will see them in the workspace.
+ *
+ * If `stripRoot` is true (default) and every entry shares a single top-level
+ * folder (e.g. "my-project-main/..."), that prefix is stripped so the project
+ * root matches what the user expects.
+ */
+app.post("/api/extract-zip", checkAuth, async (req, res) => {
+  try {
+    const { projectId, zipBase64, filename, stripRoot } = req.body || {};
+    if (!projectId || typeof zipBase64 !== "string" || !zipBase64) {
+      return res.status(400).json({ error: "projectId and zipBase64 required" });
+    }
+    const dir = safeProjectDir(projectId);
+    await fsp.mkdir(dir, { recursive: true });
+
+    let buf;
+    try {
+      // Accept both raw base64 and data URLs ("data:application/zip;base64,...")
+      const cleaned = zipBase64.includes(",")
+        ? zipBase64.slice(zipBase64.indexOf(",") + 1)
+        : zipBase64;
+      buf = Buffer.from(cleaned, "base64");
+    } catch (e) {
+      return res.status(400).json({ error: `Invalid base64: ${e.message}` });
+    }
+    if (buf.length > 80 * 1024 * 1024) {
+      return res.status(413).json({ error: "ZIP too large (max 80MB)" });
+    }
+
+    let zip;
+    try {
+      zip = new AdmZip(buf);
+    } catch (e) {
+      return res.status(400).json({ error: `Not a valid ZIP archive: ${e.message}` });
+    }
+    const entries = zip.getEntries();
+    if (entries.length === 0) {
+      return res.json({ ok: true, filename: filename || "archive.zip", totalEntries: 0, files: [] });
+    }
+
+    // Detect a single shared top-level folder (e.g. "repo-main/")
+    let prefix = "";
+    if (stripRoot !== false) {
+      const tops = new Set(
+        entries
+          .map((e) => e.entryName.split("/")[0])
+          .filter((n) => n && n !== "."),
+      );
+      if (tops.size === 1) prefix = `${[...tops][0]}/`;
+    }
+
+    const SKIP_DIRS = ["__MACOSX/", ".git/", "node_modules/"];
+    const TEXT_EXTS = new Set([
+      "txt","md","markdown","json","js","mjs","cjs","ts","tsx","jsx","html","htm","css","scss","sass","less",
+      "yml","yaml","toml","ini","env","conf","cfg","xml","svg","csv","tsv","sh","bash","zsh","fish",
+      "py","rb","go","rs","java","kt","swift","c","cpp","h","hpp","cs","php","lua","sql","graphql","gql",
+      "vue","svelte","astro","gitignore","editorconfig","dockerfile","prettierrc","eslintrc","npmrc","babelrc",
+    ]);
+    const isTextFile = (name) => {
+      if (!name.includes(".")) {
+        const lc = name.toLowerCase();
+        return ["dockerfile", "makefile", "license", "readme"].includes(lc);
+      }
+      const ext = name.split(".").pop().toLowerCase();
+      return TEXT_EXTS.has(ext);
+    };
+
+    const filesOut = [];
+    pushLog(projectId, "system", `📦 Extracting ${filename || "archive.zip"} (${entries.length} entries)…`);
+
+    for (const entry of entries) {
+      let rel = entry.entryName;
+      if (prefix && rel.startsWith(prefix)) rel = rel.slice(prefix.length);
+      if (!rel) continue;
+      if (SKIP_DIRS.some((s) => rel.startsWith(s) || rel.includes(`/${s}`))) continue;
+      // Path traversal guard
+      if (rel.includes("..")) continue;
+      const target = path.join(dir, rel);
+      if (!target.startsWith(dir)) continue;
+
+      if (entry.isDirectory) {
+        await fsp.mkdir(target, { recursive: true });
+        continue;
+      }
+      const data = entry.getData();
+      await fsp.mkdir(path.dirname(target), { recursive: true });
+      await fsp.writeFile(target, data);
+
+      const isText = isTextFile(rel) && data.length <= 256 * 1024;
+      const fileEntry = { path: rel, size: data.length, isText };
+      if (isText) {
+        try {
+          fileEntry.content = data.toString("utf8");
+        } catch {
+          fileEntry.isText = false;
+        }
+      }
+      filesOut.push(fileEntry);
+    }
+
+    pushLog(projectId, "system", `✅ Extracted ${filesOut.length} files into workspace`);
+    res.json({
+      ok: true,
+      filename: filename || "archive.zip",
+      totalEntries: entries.length,
+      strippedPrefix: prefix || null,
+      files: filesOut,
+    });
+  } catch (e) {
+    res.status(500).json({ error: String(e?.message || e) });
+  }
+});
 
 /**
  * Generic shell exec inside a project's workspace dir.

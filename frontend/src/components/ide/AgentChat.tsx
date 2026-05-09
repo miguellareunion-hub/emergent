@@ -10,6 +10,11 @@ import {
   Wand2,
   ShieldCheck,
   Wrench,
+  Paperclip,
+  X,
+  ImageIcon,
+  FileArchive,
+  FileText,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { FileNode } from "@/lib/projects";
@@ -26,6 +31,12 @@ import {
 import { validateProject, formatIssuesForFixer } from "@/lib/projectValidator";
 import { detectIntent, MODIFY_GUARD_PROMPT } from "@/lib/intentDetector";
 import { TOOL_DEFS, executeTool, type ToolCall, type ToolResult } from "@/lib/agentTools";
+import {
+  type Attachment,
+  processFile,
+  extractZipOnRunner,
+  humanSize,
+} from "@/lib/attachments";
 
 type AgentRole = "builder" | "fixer" | "planner";
 
@@ -74,13 +85,27 @@ function extractPlan(raw: string): PlanStep[] | null {
   }
 }
 
+/** A single content part for multimodal messages (vision-capable LLMs). */
+type MsgContentPart =
+  | { type: "text"; text: string }
+  | { type: "image_url"; image_url: { url: string } };
+
 type Msg = {
   role: "user" | "assistant";
-  content: string;
+  /** Either plain text (default) or an array of parts (when attaching images). */
+  content: string | MsgContentPart[];
   agentRole?: AgentRole;
   /** Native-tools mode: list of tool calls executed during this assistant turn. */
   toolEvents?: { label: string; ok: boolean }[];
 };
+
+/** Get the textual representation of a message — used everywhere we need a string. */
+function msgText(content: string | MsgContentPart[]): string {
+  if (typeof content === "string") return content;
+  return content
+    .map((p) => (p.type === "text" ? p.text : `[image: ${p.image_url.url.slice(0, 40)}…]`))
+    .join("\n");
+}
 
 interface Props {
   projectId: string;
@@ -160,8 +185,11 @@ export function AgentChat({
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [statusLine, setStatusLineRaw] = useState<string>("");
+  const [attachments, setAttachments] = useState<Attachment[]>([]);
+  const [attachmentError, setAttachmentError] = useState<string>("");
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
   const abortRef = useRef<AbortController | null>(null);
-  const sendRef = useRef<((text: string) => void) | null>(null);
+  const sendRef = useRef<((text: string, attached?: Attachment[]) => void) | null>(null);
 
   // Prevent accidental page reloads / navigation while the AI agent is
   // streaming / writing files. Without this guard, mobile pull-to-refresh,
@@ -558,6 +586,8 @@ export function AgentChat({
   const runAgentToolLoop = async (
     initialUserPrompt: string,
     controller: AbortController,
+    /** Optional multimodal content (with images) — overrides the plain prompt. */
+    userContent?: string | MsgContentPart[],
   ): Promise<boolean> => {
     const settings = loadAISettings();
     const agentsSettings = loadAgentsSettings();
@@ -695,7 +725,17 @@ When a tool returns an error you MUST react like a senior engineer, not by retry
       { role: "system", content: systemPrompt },
       {
         role: "user",
-        content: `${initialUserPrompt}\n\n<currently_open_file>${activeFile?.name ?? "(none)"}</currently_open_file>`,
+        content:
+          userContent !== undefined && Array.isArray(userContent)
+            ? // Inject multimodal content: text + images
+              ([
+                {
+                  type: "text",
+                  text: `${initialUserPrompt}\n\n<currently_open_file>${activeFile?.name ?? "(none)"}</currently_open_file>`,
+                },
+                ...userContent.filter((p) => p.type === "image_url"),
+              ] as unknown as string)
+            : `${initialUserPrompt}\n\n<currently_open_file>${activeFile?.name ?? "(none)"}</currently_open_file>`,
       },
     ];
 
@@ -987,6 +1027,8 @@ When a tool returns an error you MUST react like a senior engineer, not by retry
     stepLabel?: string,
     /** Optional intent override (for plan steps we always treat them as targeted). */
     intentOverride?: "modify" | "create",
+    /** Optional multimodal user content (with images). */
+    userContentOverride?: string | MsgContentPart[],
   ): Promise<boolean> => {
     const agentsSettings = loadAgentsSettings();
     if (!agentsSettings.builder.enabled) {
@@ -1017,10 +1059,17 @@ When a tool returns an error you MUST react like a senior engineer, not by retry
       instruction,
     );
     const prefix = stepLabel ? `${stepLabel}\n\n` : "";
-    const builderUserMsg: Msg = {
-      role: "user",
-      content: `${guardBlock}${prefix}${instruction}\n\n<context>\n${buildContext(currentFiles, activeFile?.name)}\n</context>`,
-    };
+    const fullText = `${guardBlock}${prefix}${instruction}\n\n<context>\n${buildContext(currentFiles, activeFile?.name)}\n</context>`;
+    const builderUserMsg: Msg =
+      userContentOverride && Array.isArray(userContentOverride)
+        ? {
+            role: "user",
+            content: [
+              { type: "text", text: fullText },
+              ...userContentOverride.filter((p) => p.type === "image_url"),
+            ],
+          }
+        : { role: "user", content: fullText };
     const builderHistory: Msg[] = [...priorMessages, builderUserMsg];
     const builderResult = await runAgentTurn("builder", builderHistory, controller.signal);
     if (!builderResult) return false;
@@ -1175,15 +1224,97 @@ When a tool returns an error you MUST react like a senior engineer, not by retry
     return true;
   };
 
-  const send = async (text: string) => {
+  const send = async (text: string, attached?: Attachment[]) => {
     const trimmed = text.trim();
-    if (!trimmed || loading) return;
+    const atts = attached ?? attachments;
+    if (loading) return;
+    if (!trimmed && atts.length === 0) return;
 
-    const visibleUserMsg: Msg = { role: "user", content: trimmed };
+    // ---- 1. Process attachments BEFORE building the message ----
+    // For ZIPs we extract on the runner and load text files into the project
+    // state; the agent then sees the new files via list_files().
+    setLoading(true);
+    let zipSummary = "";
+    const textFileBlocks: string[] = [];
+    const imageParts: MsgContentPart[] = [];
+
+    for (const a of atts) {
+      if (a.kind === "image" && a.dataUrl) {
+        imageParts.push({ type: "image_url", image_url: { url: a.dataUrl } });
+      } else if (a.kind === "text" && typeof a.text === "string") {
+        textFileBlocks.push(
+          `### Attached file: \`${a.name}\` (${humanSize(a.size)})\n\`\`\`\n${a.text}\n\`\`\``,
+        );
+      } else if (a.kind === "zip") {
+        setStatusLine(`📦 Extraction de ${a.name}…`);
+        const result = await extractZipOnRunner(a, projectId);
+        if (!result.ok) {
+          setMessages((prev) => [
+            ...prev,
+            {
+              role: "assistant",
+              content: `⚠️ Impossible d'extraire **${a.name}** : ${result.error || "erreur inconnue"}.\n\nVérifie que le runner local est démarré.`,
+            },
+          ]);
+          setLoading(false);
+          setStatusLine("");
+          return;
+        }
+        // Load every TEXT file into the project state so the agent can see
+        // and modify it. Binary files stay on disk in the workspace.
+        let loadedText = 0;
+        let skippedBinary = 0;
+        for (const f of result.files) {
+          if (f.isText && typeof f.content === "string") {
+            onWriteFile(f.path, f.content);
+            loadedText += 1;
+            if (typeof window !== "undefined") {
+              window.dispatchEvent(
+                new CustomEvent("lovable:agent-file-write", { detail: { path: `📦 ${f.path}` } }),
+              );
+            }
+          } else {
+            skippedBinary += 1;
+          }
+        }
+        const top = result.files.slice(0, 30).map((f) => `- \`${f.path}\` (${humanSize(f.size)})`).join("\n");
+        const more = result.files.length > 30 ? `\n…and ${result.files.length - 30} more` : "";
+        zipSummary +=
+          `\n\n### 📦 ZIP extracted: \`${a.name}\`\n` +
+          `- ${result.files.length} files extracted into the workspace` +
+          (result.strippedPrefix ? ` (stripped \`${result.strippedPrefix}\` prefix)` : "") +
+          `\n- ${loadedText} text file(s) loaded into the editor\n` +
+          (skippedBinary > 0 ? `- ${skippedBinary} binary file(s) kept in workspace only\n` : "") +
+          `\n**Files:**\n${top}${more}`;
+      }
+    }
+    setStatusLine("");
+
+    // ---- 2. Build the visible user message (multimodal if has images) ----
+    const fullText = [
+      trimmed,
+      textFileBlocks.length > 0 ? textFileBlocks.join("\n\n") : "",
+      zipSummary,
+    ]
+      .filter(Boolean)
+      .join("\n\n");
+
+    let userContent: string | MsgContentPart[];
+    if (imageParts.length > 0) {
+      userContent = [
+        { type: "text", text: fullText || "(no text — see attached image)" },
+        ...imageParts,
+      ];
+    } else {
+      userContent = fullText;
+    }
+
+    const visibleUserMsg: Msg = { role: "user", content: userContent };
     const baseHistory: Msg[] = [...messages, visibleUserMsg];
     setMessages(baseHistory);
     setInput("");
-    setLoading(true);
+    setAttachments([]);
+    setAttachmentError("");
 
     // Notify the Runner panel that an agent cycle just started
     if (typeof window !== "undefined") {
@@ -1195,15 +1326,19 @@ When a tool returns an error you MUST react like a senior engineer, not by retry
     const controller = new AbortController();
     abortRef.current = controller;
 
+    // For routing decisions (intent detection, planner heuristics) we keep
+    // working with the textual portion only.
+    const promptForRouting = fullText || "(image attached)";
+
     try {
       const agentsSettings = loadAgentsSettings();
       const aiSettings = loadAISettings();
       const currentFilesNow = getLatestFiles();
-      const topIntent = detectIntent(trimmed, currentFilesNow.length > 0);
+      const topIntent = detectIntent(promptForRouting, currentFilesNow.length > 0);
 
       // -------- Native tool-calling mode (agents = same caps as Lovable IDE) --------
       if (agentsSettings.useNativeTools && supportsReliableNativeTools(aiSettings.provider)) {
-        await runAgentToolLoop(trimmed, controller);
+        await runAgentToolLoop(promptForRouting, controller, userContent);
         setStatusLine("");
         if (typeof window !== "undefined") {
           window.dispatchEvent(new CustomEvent("lovable:agent-done"));
@@ -1218,13 +1353,13 @@ When a tool returns an error you MUST react like a senior engineer, not by retry
       if (
         topIntent === "create" &&
         agentsSettings.planner.enabled &&
-        shouldPlan(trimmed, agentsSettings.plannerMinChars)
+        shouldPlan(promptForRouting, agentsSettings.plannerMinChars)
       ) {
         setStatusLine("Planner agent is breaking your request into steps…");
         const plannerHistory: Msg[] = [
           {
             role: "user",
-            content: `User request:\n"""${trimmed}"""\n\nProject currently has these files:\n${
+            content: `User request:\n"""${promptForRouting}"""\n\nProject currently has these files:\n${
               files.length === 0 ? "(empty)" : files.map((f) => f.name).join(", ")
             }\n\nReturn the plan now as JSON only.`,
           },
@@ -1254,14 +1389,14 @@ When a tool returns an error you MUST react like a senior engineer, not by retry
             step.instruction,
             messages,
             controller,
-            `(Original user goal: ${trimmed})\n\nStep ${i + 1}/${plan.length} — ${step.title}`,
+            `(Original user goal: ${promptForRouting})\n\nStep ${i + 1}/${plan.length} — ${step.title}`,
           );
           if (!ok) break;
         }
       } else {
         // Simple single-shot prompt
         setStatusLine("Builder agent is thinking…");
-        await runBuildCycle(trimmed, messages, controller);
+        await runBuildCycle(promptForRouting, messages, controller, undefined, undefined, userContent);
       }
 
       setStatusLine("");
@@ -1358,7 +1493,104 @@ When a tool returns an error you MUST react like a senior engineer, not by retry
         }}
         className="border-t border-border bg-[var(--sidebar-bg)] p-2"
       >
+        <input
+          ref={fileInputRef}
+          type="file"
+          multiple
+          accept="image/*,.zip,.txt,.md,.json,.js,.mjs,.cjs,.ts,.tsx,.jsx,.html,.htm,.css,.scss,.yml,.yaml,.toml,.xml,.svg,.csv,.sh,.py,.rb,.go,.rs,.sql,.env"
+          className="hidden"
+          data-testid="agent-chat-file-input"
+          onChange={async (e) => {
+            const files = Array.from(e.target.files || []);
+            e.target.value = "";
+            if (files.length === 0) return;
+            setAttachmentError("");
+            const next: Attachment[] = [];
+            for (const f of files) {
+              const r = await processFile(f);
+              if ("error" in r) {
+                setAttachmentError(r.error);
+              } else {
+                next.push(r);
+              }
+            }
+            if (next.length > 0) setAttachments((prev) => [...prev, ...next]);
+          }}
+        />
+
+        {attachmentError && (
+          <div
+            className="mb-2 flex items-center justify-between gap-2 rounded-md border border-red-500/30 bg-red-500/10 px-2 py-1 text-xs text-red-400"
+            data-testid="agent-chat-attachment-error"
+          >
+            <span>{attachmentError}</span>
+            <button
+              type="button"
+              onClick={() => setAttachmentError("")}
+              className="text-red-400 hover:text-red-300"
+            >
+              <X className="h-3 w-3" />
+            </button>
+          </div>
+        )}
+
+        {attachments.length > 0 && (
+          <div className="mb-2 flex flex-wrap gap-1.5" data-testid="agent-chat-attachments">
+            {attachments.map((a) => {
+              const Icon =
+                a.kind === "image" ? ImageIcon : a.kind === "zip" ? FileArchive : FileText;
+              return (
+                <div
+                  key={a.id}
+                  className="group flex items-center gap-1.5 rounded-md border border-border bg-card px-2 py-1 text-xs"
+                  data-testid={`agent-chat-attachment-chip-${a.kind}`}
+                >
+                  {a.kind === "image" && a.dataUrl ? (
+                    <img
+                      src={a.dataUrl}
+                      alt={a.name}
+                      className="h-6 w-6 rounded object-cover"
+                    />
+                  ) : (
+                    <Icon
+                      className={cn(
+                        "h-3.5 w-3.5",
+                        a.kind === "zip" ? "text-amber-500" : "text-muted-foreground",
+                      )}
+                    />
+                  )}
+                  <span className="max-w-[140px] truncate text-foreground" title={a.name}>
+                    {a.name}
+                  </span>
+                  <span className="text-muted-foreground">{humanSize(a.size)}</span>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setAttachments((prev) => prev.filter((x) => x.id !== a.id))
+                    }
+                    className="ml-1 rounded p-0.5 text-muted-foreground opacity-60 hover:bg-muted hover:text-foreground hover:opacity-100"
+                    data-testid={`agent-chat-attachment-remove-${a.id}`}
+                    title="Retirer"
+                  >
+                    <X className="h-3 w-3" />
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+        )}
+
         <div className="flex items-end gap-2 rounded-md border border-border bg-input p-2 focus-within:border-primary">
+          <button
+            type="button"
+            onClick={() => fileInputRef.current?.click()}
+            disabled={loading}
+            className="rounded-md p-1.5 text-muted-foreground transition hover:bg-muted hover:text-foreground disabled:opacity-50"
+            title="Joindre image, ZIP ou fichier texte"
+            data-testid="agent-chat-attach-button"
+          >
+            <Paperclip className="h-4 w-4" />
+          </button>
           <textarea
             value={input}
             onChange={(e) => setInput(e.target.value)}
@@ -1368,14 +1600,20 @@ When a tool returns an error you MUST react like a senior engineer, not by retry
                 send(input);
               }
             }}
-            placeholder="Ask the agent to build something…"
+            placeholder={
+              attachments.length > 0
+                ? "Décris ce que tu veux faire avec ces fichiers…"
+                : "Ask the agent to build something…"
+            }
             rows={1}
             className="max-h-32 flex-1 resize-none bg-transparent text-sm outline-none placeholder:text-muted-foreground"
+            data-testid="agent-chat-textarea"
           />
           <button
             type="submit"
-            disabled={loading || !input.trim()}
+            disabled={loading || (!input.trim() && attachments.length === 0)}
             className="rounded-md bg-primary p-1.5 text-primary-foreground transition hover:opacity-90 disabled:opacity-50"
+            data-testid="agent-chat-send-button"
           >
             <Send className="h-4 w-4" />
           </button>
@@ -1387,10 +1625,30 @@ When a tool returns an error you MUST react like a senior engineer, not by retry
 
 function ChatMessage({ message }: { message: Msg }) {
   if (message.role === "user") {
+    const parts = Array.isArray(message.content) ? message.content : null;
+    const text = parts
+      ? parts.filter((p) => p.type === "text").map((p) => (p as { text: string }).text).join("\n")
+      : (message.content as string);
+    const images = parts
+      ? parts.filter((p) => p.type === "image_url").map((p) => (p as { image_url: { url: string } }).image_url.url)
+      : [];
     return (
       <div className="flex justify-end gap-2 text-sm">
-        <div className="max-w-[85%] rounded-lg bg-primary px-3 py-2 text-primary-foreground">
-          <span className="whitespace-pre-wrap">{message.content}</span>
+        <div className="max-w-[85%] space-y-2 rounded-lg bg-primary px-3 py-2 text-primary-foreground">
+          {images.length > 0 && (
+            <div className="flex flex-wrap gap-2">
+              {images.map((src, i) => (
+                <img
+                  key={i}
+                  src={src}
+                  alt={`attachment-${i}`}
+                  className="max-h-40 max-w-[180px] rounded border border-white/20 object-cover"
+                  data-testid={`user-attached-image-${i}`}
+                />
+              ))}
+            </div>
+          )}
+          {text && <span className="whitespace-pre-wrap">{text}</span>}
         </div>
         <div className="mt-1 flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-muted text-muted-foreground">
           <User2 className="h-3.5 w-3.5" />
@@ -1399,7 +1657,8 @@ function ChatMessage({ message }: { message: Msg }) {
     );
   }
 
-  const { text, actions } = parseAgentOutput(message.content || "");
+  const rawText = typeof message.content === "string" ? message.content : msgText(message.content);
+  const { text, actions } = parseAgentOutput(rawText || "");
   const isFixer = message.agentRole === "fixer";
   return (
     <div className="flex justify-start gap-2 text-sm">

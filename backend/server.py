@@ -42,6 +42,7 @@ RUNNER_API_PATHS = {
     "health",
     "read-file",
     "list-files",
+    "extract-zip",
 }
 
 # Create the main app without a prefix
