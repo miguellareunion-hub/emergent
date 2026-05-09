@@ -8,7 +8,7 @@ Sur ton serveur Ubuntu (root ou sudo) :
 
 ```bash
 # 1. Récupère le script
-curl -fsSL https://raw.githubusercontent.com/miguellareunion-hub/code-genie/main/deploy/install.sh -o install.sh
+curl -fsSL https://raw.githubusercontent.com/miguellareunion-hub/emergent/main/deploy/install.sh -o install.sh
 
 # 2. Lance-le
 sudo bash install.sh
@@ -20,7 +20,7 @@ C'est tout. Au bout de ~5 min tout tourne sur `http://<ip-du-serveur>`.
 
 | Flag | Description | Exemple |
 |---|---|---|
-| `--repo URL` | Fork du dépôt à installer | `--repo https://github.com/moi/code-genie.git` |
+| `--repo URL` | Fork du dépôt à installer | `--repo https://github.com/moi/emergent.git` |
 | `--dir PATH` | Dossier d'installation (défaut `/opt/lovable-ide`) | `--dir /srv/ide` |
 | `--domain DOM` | Active HTTPS Let's Encrypt sur ce domaine | `--domain ide.exemple.com` |
 | `--emergent-key KEY` | Clé Emergent LLM (sinon clé par défaut Emergent) | `--emergent-key sk-emergent-xxx` |

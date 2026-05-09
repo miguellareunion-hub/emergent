@@ -27,7 +27,7 @@
 set -euo pipefail
 
 #------------------------------------------------------------------------- args
-REPO_URL="https://github.com/miguellareunion-hub/code-genie.git"
+REPO_URL="https://github.com/miguellareunion-hub/emergent.git"
 APP_DIR="/opt/lovable-ide"
 DOMAIN=""
 EMERGENT_KEY="${EMERGENT_LLM_KEY:-sk-emergent-fA69068E08c5c45Cc1}"
