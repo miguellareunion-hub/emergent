@@ -244,7 +244,16 @@ if [ -n "$BACKEND_DIR" ]; then
   # shellcheck disable=SC1091
   source "$BACKEND_DIR/.venv/bin/activate"
   pip install -q --upgrade pip
-  pip install -q -r "$BACKEND_DIR/requirements.txt"
+
+  # Filter out Emergent-private packages that aren't on public PyPI.
+  # They are only needed when running INSIDE the Emergent platform; the
+  # standalone Ubuntu install talks to the LLM provider directly via fetch
+  # in the TanStack Start /api/chat route, so we don't need them at all.
+  REQ_FILTERED="$(mktemp)"
+  grep -vE '^(emergentintegrations|emergent-)' "$BACKEND_DIR/requirements.txt" > "$REQ_FILTERED" || true
+  pip install -q -r "$REQ_FILTERED" || warn "Some pip packages failed — continuing"
+  rm -f "$REQ_FILTERED"
+
   # Required by the FastAPI proxy that forwards /api/{chat,exec,run,...}
   # to the right upstream (TanStack Start :3000 or runner-server :7070).
   pip install -q httpx
