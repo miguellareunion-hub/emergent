@@ -275,18 +275,24 @@ EOF
 fi
 
 #---------------------------------------------------------------- supervisor
+# Resolve absolute paths to yarn/node so supervisor doesn't depend on PATH.
+YARN_BIN="$(command -v yarn || echo /usr/bin/yarn)"
+NODE_BIN="$(command -v node || echo /usr/bin/node)"
+
 log "Writing /etc/supervisor/conf.d/lovable-ide.conf"
 cat > /etc/supervisor/conf.d/lovable-ide.conf <<EOF
 [program:lovable-frontend]
-command=/usr/bin/yarn start
+command=$YARN_BIN start
 directory=$FRONTEND_DIR
 autostart=true
 autorestart=true
+startsecs=10
+startretries=5
 stopasgroup=true
 killasgroup=true
 stdout_logfile=/var/log/lovable-frontend.out.log
 stderr_logfile=/var/log/lovable-frontend.err.log
-environment=HOST="0.0.0.0",PORT="3000",NODE_ENV="production",HOME="/root",PLAYWRIGHT_BROWSERS_PATH="$PLAYWRIGHT_BROWSERS_PATH_VAL"
+environment=HOST="0.0.0.0",PORT="3000",HOME="/root",PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",PLAYWRIGHT_BROWSERS_PATH="$PLAYWRIGHT_BROWSERS_PATH_VAL"
 
 EOF
 
@@ -297,6 +303,7 @@ command=$BACKEND_DIR/.venv/bin/uvicorn server:app --host 0.0.0.0 --port 8001 --w
 directory=$BACKEND_DIR
 autostart=true
 autorestart=true
+startsecs=5
 stopasgroup=true
 killasgroup=true
 stdout_logfile=/var/log/lovable-backend.out.log
@@ -308,15 +315,16 @@ fi
 if [ -n "$RUNNER_DIR" ]; then
 cat >> /etc/supervisor/conf.d/lovable-ide.conf <<EOF
 [program:lovable-runner]
-command=/usr/bin/node server.js
+command=$NODE_BIN server.js
 directory=$RUNNER_DIR
 autostart=true
 autorestart=true
+startsecs=5
 stopasgroup=true
 killasgroup=true
 stdout_logfile=/var/log/lovable-runner.out.log
 stderr_logfile=/var/log/lovable-runner.err.log
-environment=PORT="7070",RUNNER_TOKEN="$RUNNER_TOKEN_VALUE",WORKSPACES_DIR="/var/lib/lovable-runner-workspaces",HOME="/root"
+environment=PORT="7070",RUNNER_TOKEN="$RUNNER_TOKEN_VALUE",WORKSPACES_DIR="/var/lib/lovable-runner-workspaces",HOME="/root",PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 EOF
 mkdir -p /var/lib/lovable-runner-workspaces
 fi
@@ -327,6 +335,28 @@ supervisorctl restart \
   lovable-frontend \
   ${BACKEND_DIR:+lovable-backend} \
   ${RUNNER_DIR:+lovable-runner} || true
+
+# ---- Verify the services actually came up. If not, dump the last lines of
+# their logs so the user immediately sees the root cause instead of a 502. ----
+log "Waiting 10s for services to settle…"
+sleep 10
+PROBLEMS=0
+for svc in lovable-frontend ${BACKEND_DIR:+lovable-backend} ${RUNNER_DIR:+lovable-runner}; do
+  if ! supervisorctl status "$svc" 2>/dev/null | grep -q RUNNING; then
+    err "$svc is NOT running. Last log lines:"
+    case "$svc" in
+      lovable-frontend) tail -n 20 /var/log/lovable-frontend.err.log 2>/dev/null || true ;;
+      lovable-backend)  tail -n 20 /var/log/lovable-backend.err.log 2>/dev/null || true ;;
+      lovable-runner)   tail -n 20 /var/log/lovable-runner.err.log 2>/dev/null || true ;;
+    esac
+    PROBLEMS=$((PROBLEMS+1))
+  else
+    log "$svc is RUNNING ✓"
+  fi
+done
+if [ "$PROBLEMS" -gt 0 ]; then
+  warn "$PROBLEMS service(s) failed to start. Fix the errors above, then run: sudo supervisorctl restart all"
+fi
 
 #--------------------------------------------------------------------- nginx
 log "Writing /etc/nginx/sites-available/lovable-ide"
