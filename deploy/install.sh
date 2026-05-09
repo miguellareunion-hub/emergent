@@ -59,14 +59,25 @@ log() { echo -e "\033[1;32m[install]\033[0m $*"; }
 warn() { echo -e "\033[1;33m[warn]\033[0m $*"; }
 err()  { echo -e "\033[1;31m[err]\033[0m $*" >&2; }
 
-#---------------------------------------------------------------- system update
+#------------------------------------------------------------------- cleanup
+# Remove any stale MongoDB apt repo file from a previous failed run. If left
+# in place, the FIRST `apt-get update` below would fail with
+# "does not have a Release file" and abort the whole installer.
+shopt -s nullglob
+for stale in /etc/apt/sources.list.d/mongodb-org-*.list; do
+  log "Removing stale apt source: $stale"
+  rm -f "$stale"
+done
+shopt -u nullglob
+
+#------------------------------------------------------------------ system update
 log "Updating apt & installing base packages"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
 apt-get install -yqq \
   ca-certificates curl gnupg git build-essential \
   python3 python3-venv python3-pip \
-  supervisor nginx ufw jq
+  supervisor nginx ufw jq openssl
 
 #----------------------------------------------------------------------- node
 if ! command -v node >/dev/null 2>&1 || ! node -v | grep -qE "^v${NODE_MAJOR}\."; then
