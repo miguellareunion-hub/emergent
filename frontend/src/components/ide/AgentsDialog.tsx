@@ -124,8 +124,18 @@ export function AgentsDialog({ open, onClose }: Props) {
         <div className="flex min-h-0 flex-1">
           {/* Sidebar list */}
           <aside className="w-60 shrink-0 overflow-auto border-r border-border bg-[var(--sidebar-bg)] p-2">
-            <div className="mb-2 px-2 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
-              Agents système
+            <div className="mb-2 flex items-center justify-between px-2">
+              <div className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+                Agents système
+              </div>
+              <button
+                onClick={addCustom}
+                title="Créer un nouvel agent"
+                data-testid="new-system-agent-btn"
+                className="flex items-center gap-1 rounded bg-primary/15 px-1.5 py-0.5 text-[10px] font-medium text-primary hover:bg-primary/25"
+              >
+                <Plus className="h-3 w-3" /> Nouveau
+              </button>
             </div>
             <div className="space-y-1">
               {(Object.keys(AGENT_META) as AgentRole[]).map((role) => {
