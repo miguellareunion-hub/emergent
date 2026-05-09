@@ -229,8 +229,17 @@ export function AgentChat({
       const prompt = `Le Node Runner vient de produire cette erreur :\n\n\`\`\`\n${detail.error}\n\`\`\`\n\nIdentifie la cause et corrige les fichiers concernés.`;
       sendRef.current(prompt);
     };
+    const onQAReport = (ev: Event) => {
+      const detail = (ev as CustomEvent<{ message: string }>).detail;
+      if (!detail?.message || !sendRef.current) return;
+      sendRef.current(detail.message);
+    };
     window.addEventListener("lovable:fix-runner-error", onFixError);
-    return () => window.removeEventListener("lovable:fix-runner-error", onFixError);
+    window.addEventListener("lovable:qa-report-to-builder", onQAReport);
+    return () => {
+      window.removeEventListener("lovable:fix-runner-error", onFixError);
+      window.removeEventListener("lovable:qa-report-to-builder", onQAReport);
+    };
   }, []);
 
   const buildContext = (currentFiles: FileNode[], openName?: string) =>

@@ -117,3 +117,5 @@ credentials.json
 *.pem
 *.key
 .credentials
+frontend/.playwright-browsers/chromium-1217/chrome-linux/chrome
+frontend/.playwright-browsers/chromium_headless_shell-1217/chrome-linux/headless_shell

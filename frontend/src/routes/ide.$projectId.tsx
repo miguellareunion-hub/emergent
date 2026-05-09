@@ -10,6 +10,7 @@ import {
   Bot,
   Download,
   Server,
+  Bug,
 } from "lucide-react";
 import JSZip from "jszip";
 import { useProject } from "@/hooks/useProject";
@@ -19,6 +20,7 @@ import { PreviewPane } from "@/components/ide/PreviewPane";
 import { Terminal, type ConsoleEntry } from "@/components/ide/Terminal";
 import { AgentChat } from "@/components/ide/AgentChat";
 import { RunnerPanel } from "@/components/ide/RunnerPanel";
+import { QAPanel } from "@/components/ide/QAPanel";
 import { SettingsDialog } from "@/components/ide/SettingsDialog";
 import { AgentsDialog } from "@/components/ide/AgentsDialog";
 import { cn } from "@/lib/utils";
@@ -33,7 +35,7 @@ export const Route = createFileRoute("/ide/$projectId")({
   component: IdePage,
 });
 
-type RightTab = "preview" | "agent" | "runner";
+type RightTab = "preview" | "agent" | "runner" | "qa";
 type BottomTab = "terminal";
 
 function IdePage() {
@@ -205,6 +207,12 @@ function IdePage() {
             label="Runner"
           />
           <TabButton
+            active={rightTab === "qa"}
+            onClick={() => setRightTab("qa")}
+            icon={<Bug className="h-3.5 w-3.5" />}
+            label="QA"
+          />
+          <TabButton
             active={bottomOpen}
             onClick={() => setBottomOpen((v) => !v)}
             icon={<TerminalSquare className="h-3.5 w-3.5" />}
@@ -301,6 +309,21 @@ function IdePage() {
           </div>
           <div className={cn("h-full", rightTab === "runner" ? "block" : "hidden")}>
             <RunnerPanel projectId={project.id} files={project.files} />
+          </div>
+          <div className={cn("h-full", rightTab === "qa" ? "block" : "hidden")}>
+            <QAPanel
+              projectId={project.id}
+              files={project.files}
+              onSendToBuilder={(msg) => {
+                // Bridge: hand the QA report to the AgentChat, switch tabs.
+                window.dispatchEvent(
+                  new CustomEvent("lovable:qa-report-to-builder", {
+                    detail: { message: msg },
+                  }),
+                );
+                setRightTab("agent");
+              }}
+            />
           </div>
         </aside>
       </div>

@@ -31,7 +31,7 @@ db = client[os.environ['DB_NAME']]
 TANSTACK_BASE = os.environ.get("TANSTACK_BASE", "http://localhost:3000")
 RUNNER_BASE = os.environ.get("RUNNER_BASE", "http://localhost:7070")
 
-TANSTACK_API_PATHS = {"chat", "web-search"}
+TANSTACK_API_PATHS = {"chat", "web-search", "qa"}
 RUNNER_API_PATHS = {
     "exec",
     "http-fetch",

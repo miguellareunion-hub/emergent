@@ -12,8 +12,7 @@ import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as IdeProjectIdRouteImport } from './routes/ide.$projectId'
 import { Route as ApiWebSearchRouteImport } from './routes/api.web-search'
-import { Route as ApiHttpFetchRouteImport } from './routes/api.http-fetch'
-import { Route as ApiExecRouteImport } from './routes/api.exec'
+import { Route as ApiQaRouteImport } from './routes/api.qa'
 import { Route as ApiChatRouteImport } from './routes/api.chat'
 
 const IndexRoute = IndexRouteImport.update({
@@ -31,14 +30,9 @@ const ApiWebSearchRoute = ApiWebSearchRouteImport.update({
   path: '/api/web-search',
   getParentRoute: () => rootRouteImport,
 } as any)
-const ApiHttpFetchRoute = ApiHttpFetchRouteImport.update({
-  id: '/api/http-fetch',
-  path: '/api/http-fetch',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const ApiExecRoute = ApiExecRouteImport.update({
-  id: '/api/exec',
-  path: '/api/exec',
+const ApiQaRoute = ApiQaRouteImport.update({
+  id: '/api/qa',
+  path: '/api/qa',
   getParentRoute: () => rootRouteImport,
 } as any)
 const ApiChatRoute = ApiChatRouteImport.update({
@@ -50,16 +44,14 @@ const ApiChatRoute = ApiChatRouteImport.update({
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/api/chat': typeof ApiChatRoute
-  '/api/exec': typeof ApiExecRoute
-  '/api/http-fetch': typeof ApiHttpFetchRoute
+  '/api/qa': typeof ApiQaRoute
   '/api/web-search': typeof ApiWebSearchRoute
   '/ide/$projectId': typeof IdeProjectIdRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/api/chat': typeof ApiChatRoute
-  '/api/exec': typeof ApiExecRoute
-  '/api/http-fetch': typeof ApiHttpFetchRoute
+  '/api/qa': typeof ApiQaRoute
   '/api/web-search': typeof ApiWebSearchRoute
   '/ide/$projectId': typeof IdeProjectIdRoute
 }
@@ -67,8 +59,7 @@ export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
   '/api/chat': typeof ApiChatRoute
-  '/api/exec': typeof ApiExecRoute
-  '/api/http-fetch': typeof ApiHttpFetchRoute
+  '/api/qa': typeof ApiQaRoute
   '/api/web-search': typeof ApiWebSearchRoute
   '/ide/$projectId': typeof IdeProjectIdRoute
 }
@@ -77,24 +68,16 @@ export interface FileRouteTypes {
   fullPaths:
     | '/'
     | '/api/chat'
-    | '/api/exec'
-    | '/api/http-fetch'
+    | '/api/qa'
     | '/api/web-search'
     | '/ide/$projectId'
   fileRoutesByTo: FileRoutesByTo
-  to:
-    | '/'
-    | '/api/chat'
-    | '/api/exec'
-    | '/api/http-fetch'
-    | '/api/web-search'
-    | '/ide/$projectId'
+  to: '/' | '/api/chat' | '/api/qa' | '/api/web-search' | '/ide/$projectId'
   id:
     | '__root__'
     | '/'
     | '/api/chat'
-    | '/api/exec'
-    | '/api/http-fetch'
+    | '/api/qa'
     | '/api/web-search'
     | '/ide/$projectId'
   fileRoutesById: FileRoutesById
@@ -102,8 +85,7 @@ export interface FileRouteTypes {
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
   ApiChatRoute: typeof ApiChatRoute
-  ApiExecRoute: typeof ApiExecRoute
-  ApiHttpFetchRoute: typeof ApiHttpFetchRoute
+  ApiQaRoute: typeof ApiQaRoute
   ApiWebSearchRoute: typeof ApiWebSearchRoute
   IdeProjectIdRoute: typeof IdeProjectIdRoute
 }
@@ -131,18 +113,11 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ApiWebSearchRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/api/http-fetch': {
-      id: '/api/http-fetch'
-      path: '/api/http-fetch'
-      fullPath: '/api/http-fetch'
-      preLoaderRoute: typeof ApiHttpFetchRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/api/exec': {
-      id: '/api/exec'
-      path: '/api/exec'
-      fullPath: '/api/exec'
-      preLoaderRoute: typeof ApiExecRouteImport
+    '/api/qa': {
+      id: '/api/qa'
+      path: '/api/qa'
+      fullPath: '/api/qa'
+      preLoaderRoute: typeof ApiQaRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/api/chat': {
@@ -158,8 +133,7 @@ declare module '@tanstack/react-router' {
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   ApiChatRoute: ApiChatRoute,
-  ApiExecRoute: ApiExecRoute,
-  ApiHttpFetchRoute: ApiHttpFetchRoute,
+  ApiQaRoute: ApiQaRoute,
   ApiWebSearchRoute: ApiWebSearchRoute,
   IdeProjectIdRoute: IdeProjectIdRoute,
 }
